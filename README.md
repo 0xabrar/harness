@@ -20,12 +20,9 @@ flowchart TD
     D --> E[Trial commit]
     E --> F[Verifier]
     F --> G{Verdict}
-    G -->|accept| H[Kept commit]
-    G -->|revert| I[Reverted commit]
-    H --> J[Remaining work]
-    I --> J
-    J -->|yes| B
-    J -->|no| K[Done]
+    G -->|accept| C
+    G -->|revert| C
+    C -->|empty| H[Done]
 ```
 
 That is the whole idea:
