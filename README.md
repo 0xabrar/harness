@@ -1,103 +1,98 @@
 # Harness
 
-`harness` is a Codex-native skill and control plane for long-running coding work with explicit role separation:
+`harness` is a Codex skill for long-running coding jobs.
 
-- `planner`
-- `implementer`
-- `verifier`
+It gives Codex a simple team structure:
 
-Instead of a single agent looping on “try something, measure it, keep/discard it”, the harness runs a task-DAG workflow:
+- a **planner** decides what work should happen
+- an **implementer** writes code for one task at a time
+- a **verifier** checks that exact code change
+- a **runtime** keeps the whole loop running in the background
 
-1. the planner creates or updates the task graph
-2. the implementer works one ready task and creates a trial commit
-3. the verifier evaluates that exact commit and returns `accept`, `revert`, or `needs_human`
-4. the runtime control plane applies the verdict, updates artifacts, and launches the next fresh Codex turn
+If you want Codex to work through a project over time instead of doing everything in one giant session, this is what `harness` is for.
 
-The runtime design intentionally mirrors the control-plane shape of `codex-autoresearch`:
+## What It Does
 
-- detached background runtime
-- launch and runtime manifests
-- append-only event log
-- compact state snapshot
-- lessons file
-- resumable fresh-context turns
+The harness turns a big goal into a repeatable loop:
 
-The workflow changes from metric optimization to task execution.
+1. plan the work
+2. pick one ready task
+3. implement it
+4. verify it
+5. keep it or revert it
+6. continue until the work is done
+
+The important part is that each role has a clear job. Planning, coding, and checking are separate.
+
+## How It Works
+
+```mermaid
+flowchart LR
+    A[User goal] --> B[Planner]
+    B --> C[Task graph]
+    C --> D[Implementer]
+    D --> E[Trial commit]
+    E --> F[Verifier]
+    F -->|accept| G[Keep commit]
+    F -->|revert| H[Revert commit]
+    G --> I[Next task]
+    H --> I
+    I --> B
+```
+
+In plain English:
+
+- The planner writes the task list.
+- The implementer works one task and makes a commit.
+- The verifier checks that exact commit.
+- The runtime either keeps that commit or reverts it.
+- Then the next loop starts.
 
 ## Why This Exists
 
-Most long-running agent systems need two things at once:
+A normal coding session can get messy when it runs for a long time:
 
-- clean role boundaries so planning, implementation, and verification do not collapse into one blurry loop
-- a durable runtime layer that survives fresh sessions, background execution, and interruptions
+- planning and coding blur together
+- it becomes hard to resume after interruptions
+- there is no clean audit trail
+- background execution is awkward
 
-This repo packages both:
+The harness solves that by keeping:
 
-- a skill entrypoint for Codex
-- a file-mediated runtime protocol
-- scripts for launch, status, stop, prompt generation, state updates, and lessons
-- tests for the core control-plane transitions
+- clear roles
+- a task graph
+- durable run state
+- a background runtime
+- logs and reports you can inspect later
 
-## Architecture
+## Background Runtime
 
-### Roles
+The runtime is not another coding agent. It is a control script.
 
-- `planner`
-  - human-facing before launch
-  - owns `plan.md` and `tasks.json`
-  - may add, split, reprioritize, block, or close tasks
-- `implementer`
-  - writes product code for one ready task
-  - creates exactly one trial commit for that task
-- `verifier`
-  - evaluates the exact trial commit
-  - returns `accept`, `revert`, or `needs_human`
-- `runtime`
-  - not an LLM role
-  - handles detached execution, state transitions, verdict application, status/stop, and artifact updates
+Its job is to:
 
-### Core Loop
+- start a run
+- keep it going in the background
+- launch fresh Codex turns
+- apply verifier decisions
+- write state files and logs
+- let you check status or stop the run later
 
-```text
-planner -> implementer -> verifier -> runtime decision -> repeat
+```mermaid
+flowchart TD
+    A[harness-launch.json] --> B[Background runtime]
+    B --> C[Planner turn]
+    B --> D[Implementer turn]
+    B --> E[Verifier turn]
+    B --> F[harness-state.json]
+    B --> G[harness-events.tsv]
+    B --> H[harness-runtime.log]
+    B --> I[harness-lessons.md]
 ```
 
-The runtime is intentionally dumb. It should not invent product work or rewrite the task graph. The planner owns topology, the implementer owns code changes, and the verifier owns judgment.
+## Files It Writes
 
-## Repository Layout
-
-```text
-harness/
-├── SKILL.md
-├── README.md
-├── agents/openai.yaml
-├── references/
-├── scripts/
-└── tests/
-```
-
-Important files:
-
-- `SKILL.md`
-  - skill entrypoint and role/rule summary
-- `references/`
-  - protocol docs, report schemas, state-machine docs, and artifact ownership
-- `scripts/harness_runtime_ctl.py`
-  - operator entrypoint for `create-launch`, `launch`, `start`, `run`, `status`, `stop`
-- `scripts/harness_runtime_ops.py`
-  - detached runtime lifecycle and fresh `codex exec` loop
-- `scripts/harness_supervisor_status.py`
-  - post-turn transition logic and verdict handling
-- `scripts/harness_build_prompt.py`
-  - role-specific prompt builder for planner, implementer, and verifier
-- `scripts/harness_init_run.py`
-  - initializes run-local artifacts
-- `scripts/harness_lessons.py`
-  - long-term lessons file handling
-
-## Runtime Artifacts
-
-The harness writes these files into the target repo:
+The harness writes these files into the repo it is working on:
 
 - `harness-launch.json`
 - `harness-runtime.json`
@@ -109,75 +104,80 @@ The harness writes these files into the target repo:
 - `plan.md`
 - `reports/*.json`
 
-Authority rules:
+These files are how the roles communicate with each other.
 
-- `tasks.json` is the canonical task DAG
-- `harness-state.json` is the canonical current snapshot
-- `harness-events.tsv` is the append-only audit log
-- `harness-runtime.log` is forensic trace output
-- `harness-lessons.md` is durable strategic memory across turns
+The most important ones are:
+
+- `tasks.json`
+  - the task list and dependencies
+- `plan.md`
+  - the human-readable plan
+- `harness-state.json`
+  - the current run snapshot
+- `harness-events.tsv`
+  - the audit log of what happened
+- `reports/*.json`
+  - planner, implementer, and verifier handoff reports
 
 ## Run Modes
 
 - `foreground`
-  - stay in the current Codex session
+  - keep the work in the current Codex session
 - `background`
-  - persist launch/runtime artifacts and run detached in the background
+  - run detached in the background
 - `status`
-  - inspect a detached runtime
+  - inspect a background run
 - `stop`
-  - stop a detached runtime
+  - stop a background run
 
-## Installation
+## Install
 
-### Install as a local skill
-
-Symlink the repo into your Codex skills directory:
+Install it as a local Codex skill by symlinking the repo:
 
 ```bash
 mkdir -p ~/.codex/skills
 ln -sfn /absolute/path/to/harness ~/.codex/skills/harness
 ```
 
-Then start a fresh Codex session so the new skill is picked up.
-
-### Run tests
-
-```bash
-python3 -m unittest discover -s tests -v
-```
+Then start a fresh Codex session so the skill is loaded.
 
 ## Example
-
-Use the skill the same way you would invoke a long-running Codex workflow:
 
 ```text
 $harness
 Build a Python notes CLI backed by a local JSON file. Use a planner/implementer/verifier flow and run it in background mode.
 ```
 
-The planner should:
+What should happen:
 
-- scan the target repo
-- create `plan.md` and `tasks.json`
-- define explicit acceptance criteria
-- keep the DAG coherent as the run evolves
+- the planner creates `plan.md` and `tasks.json`
+- the implementer works one task at a time
+- the verifier accepts or reverts each task commit
+- the runtime keeps going until the task graph is complete
 
-The runtime should:
+## What This Project Is Trying To Be
 
-- launch fresh `codex exec` turns
-- apply verifier decisions
-- update state and lessons
-- stop cleanly when the DAG is complete
+This project is intentionally narrow.
 
-## Current Scope
+It is meant to be:
 
-The harness is intentionally narrow:
+- reliable
+- resumable
+- easy to inspect
+- easy to run in the background
 
-- single-repo runs
-- no live inter-agent conversation
-- no swarm orchestration
-- file-mediated coordination only
-- accept/revert commit model
+It is not trying to be:
 
-That constraint is deliberate. The goal is a robust long-running harness, not a maximal multi-agent framework.
+- a giant swarm framework
+- a live multi-agent chat system
+- a multi-repo orchestration platform
+
+The goal is simple: make long-running Codex work understandable and controllable.
+
+## Tests
+
+Run the harness test suite with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
