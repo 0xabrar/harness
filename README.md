@@ -28,17 +28,19 @@ The important part is that each role has a clear job. Planning, coding, and chec
 
 ```mermaid
 flowchart TD
-    A[User goal] --> B[Planner writes plan.md and tasks.json]
-    B --> C[Implementer works one ready task]
-    C --> D[Implementer creates trial commit]
-    D --> E[Verifier checks that exact commit]
-    E --> F{Verifier decision}
-    F -->|accept| G[Runtime keeps the commit and marks the task done]
-    F -->|revert| H[Runtime reverts the commit and requeues or replans]
-    G --> I{More work left?}
-    H --> I
-    I -->|yes| B
-    I -->|no| J[Run complete]
+    A[User goal] -->|starts| B[Planner]
+    B -->|writes| C[Plan and task graph]
+    C -->|selects| D[Ready task]
+    D -->|assigns| E[Implementer]
+    E -->|produces| F[Trial commit]
+    F -->|goes to| G[Verifier]
+    G -->|returns| H{Verifier verdict}
+    H -->|accept| I[Accepted commit]
+    H -->|revert| J[Reverted commit]
+    I -->|updates| K[Remaining work]
+    J -->|updates| K
+    K -->|work remains| B
+    K -->|work complete| L[Completed run]
 ```
 
 In plain English:
@@ -82,16 +84,18 @@ Its job is to:
 ```mermaid
 flowchart TD
     A[harness-launch.json] --> B[Background runtime]
-    B --> C[Planner turn]
-    B --> D[Implementer turn]
-    B --> E[Verifier turn]
-    C --> F[plan.md and tasks.json]
-    D --> G[trial commit and implementer report]
-    E --> H[verifier report]
-    B --> I[harness-state.json]
-    B --> J[harness-events.tsv]
-    B --> K[harness-runtime.log]
-    B --> L[harness-lessons.md]
+    B --> C[Planner]
+    B --> D[Implementer]
+    B --> E[Verifier]
+    C -->|updates| F[plan.md]
+    C -->|updates| G[tasks.json]
+    D -->|writes| H[Implementer report]
+    D -->|creates| I[Trial commit]
+    E -->|writes| J[Verifier report]
+    B -->|updates| K[harness-state.json]
+    B -->|appends| L[harness-events.tsv]
+    B -->|appends| M[harness-runtime.log]
+    B -->|updates| N[harness-lessons.md]
 ```
 
 ## Files It Writes
