@@ -27,17 +27,18 @@ The important part is that each role has a clear job. Planning, coding, and chec
 ## How It Works
 
 ```mermaid
-flowchart LR
-    A[User goal] --> B[Planner]
-    B --> C[Task graph]
-    C --> D[Implementer]
-    D --> E[Trial commit]
-    E --> F[Verifier]
-    F -->|accept| G[Keep commit]
-    F -->|revert| H[Revert commit]
-    G --> I[Next task]
+flowchart TD
+    A[User goal] --> B[Planner writes plan.md and tasks.json]
+    B --> C[Implementer works one ready task]
+    C --> D[Implementer creates trial commit]
+    D --> E[Verifier checks that exact commit]
+    E --> F{Verifier decision}
+    F -->|accept| G[Runtime keeps the commit and marks the task done]
+    F -->|revert| H[Runtime reverts the commit and requeues or replans]
+    G --> I{More work left?}
     H --> I
-    I --> B
+    I -->|yes| B
+    I -->|no| J[Run complete]
 ```
 
 In plain English:
@@ -46,7 +47,7 @@ In plain English:
 - The implementer works one task and makes a commit.
 - The verifier checks that exact commit.
 - The runtime either keeps that commit or reverts it.
-- Then the next loop starts.
+- If work remains, the planner updates the task graph and the loop continues.
 
 ## Why This Exists
 
@@ -84,10 +85,13 @@ flowchart TD
     B --> C[Planner turn]
     B --> D[Implementer turn]
     B --> E[Verifier turn]
-    B --> F[harness-state.json]
-    B --> G[harness-events.tsv]
-    B --> H[harness-runtime.log]
-    B --> I[harness-lessons.md]
+    C --> F[plan.md and tasks.json]
+    D --> G[trial commit and implementer report]
+    E --> H[verifier report]
+    B --> I[harness-state.json]
+    B --> J[harness-events.tsv]
+    B --> K[harness-runtime.log]
+    B --> L[harness-lessons.md]
 ```
 
 ## Files It Writes
