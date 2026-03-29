@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+reports/
+harness-launch.json
+harness-runtime.json
+harness-runtime.log
+harness-state.json
+harness-events.tsv
+harness-lessons.md
+tasks.json
+plan.md

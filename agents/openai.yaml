@@ -1,0 +1,6 @@
+version: 1
+display_name: Harness
+short_description: Planner/implementer/verifier harness for long-running Codex work.
+default_prompt: >-
+  Use the harness workflow to plan a dynamic task DAG, run implementer and
+  verifier turns, and manage the run through the runtime control plane.
