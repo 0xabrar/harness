@@ -208,6 +208,16 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
     state_payload["state"]["reverts"] += 1
     state_payload["state"]["trial_commit"] = ""
     task["last_verdict"] = "revert"
+    append_lesson(
+        path=paths.lessons,
+        title=f"Reverted task {task_id} attempt {attempt}",
+        category="task",
+        strategy=str(implementer.get("summary") or f"Attempt {attempt} for {task_id}"),
+        outcome="revert",
+        insight=str(verdict.get("summary") or "Verifier rejected the trial commit."),
+        context=context_string(state_payload),
+        iteration=str(state_payload["state"].get("seq", 0) + 1),
+    )
     max_attempts = int(state_payload["config"].get("max_task_attempts", 3))
     if int(task.get("attempts", 0)) >= max_attempts:
         task["status"] = "failed"
