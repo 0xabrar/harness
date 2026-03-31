@@ -1,16 +1,6 @@
 # Harness
 
-`harness` is a Codex skill for long-running coding work.
-
-It splits the job into three roles:
-
-- **planner**: decides what should be built
-- **implementer**: writes the code
-- **verifier**: checks the exact code change
-
-A small runtime script keeps the loop running in the background, communicating with Codex via the `codex app-server` JSON-RPC protocol.
-
-If you want Codex to work through a project over time instead of trying to do everything in one giant session, this is what `harness` is for.
+A Codex skill for long-running coding work. Instead of one giant session, it splits the job into a planner → implementer → verifier loop and runs it in the background via the `codex app-server` JSON-RPC protocol.
 
 ## Warning
 
@@ -23,8 +13,8 @@ To use a restricted sandbox, set `execution_policy: workspace_write` in the laun
 Install it as a local Codex skill:
 
 ```bash
-mkdir -p ~/.codex/skills
-ln -sfn /absolute/path/to/harness ~/.codex/skills/harness
+mkdir -p ~/.agents/skills
+ln -sfn /absolute/path/to/harness ~/.agents/skills/harness
 ```
 
 Then start a fresh Codex session and say what you want:
@@ -65,37 +55,15 @@ flowchart TD
     C -->|empty| H[Done]
 ```
 
-- The planner creates the task DAG with dependencies and acceptance criteria.
-- The implementer works one task and creates a trial commit.
-- The verifier evaluates that exact commit against the acceptance criteria.
-- The runtime applies the verdict (keep or revert) and moves to the next task.
-- If multiple independent tasks are ready, implementers run in parallel.
-- If a task is reverted, the implementer retries with the verifier's feedback (resuming the same conversation thread).
-- The loop continues until all tasks are done or it reaches `needs_human`.
+Each role runs as a separate Codex turn with an isolated context window and returns a structured report via `outputSchema` (schemas in `schemas/*.schema.json`).
 
-## How It Works
+| Role | Job | Constraints |
+|---|---|---|
+| **Planner** | Reads the repo, creates/updates `plan.md` and `tasks.json` | Cannot write product code |
+| **Implementer** | Works one task, makes code changes, creates a trial commit | Cannot edit `tasks.json` |
+| **Verifier** | Evaluates the trial commit against acceptance criteria | Cannot modify code; returns `accept`, `revert`, or `needs_human` |
 
-Each role runs as a separate Codex turn via the `codex app-server` JSON-RPC protocol. Roles get isolated context windows (separate threads) and return structured reports enforced by `outputSchema`.
-
-The runtime is not an LLM — it's a Python script that reads reports, applies state transitions, and decides which role runs next.
-
-### Role Prompts
-
-Each role gets a prompt with its assignment and constraints:
-
-- **Planner**: reads the repo and existing plan, creates/updates `plan.md` and `tasks.json`. Cannot write product code.
-- **Implementer**: gets one task with acceptance criteria, makes code changes, creates a single trial commit. Cannot edit `tasks.json`.
-- **Verifier**: evaluates the exact trial commit, checks acceptance criteria, runs validation. Returns `accept`, `revert`, or `needs_human`. Cannot modify code.
-
-Reports are returned as structured JSON via `outputSchema` (schemas in `schemas/*.schema.json`), not written to disk by the roles.
-
-### Parallel Execution
-
-When the planner creates multiple tasks with no mutual dependencies, the runtime runs implementers concurrently — one app-server process per task.
-
-### Thread Resume
-
-When the verifier reverts a task and the implementer retries, the runtime resumes the implementer's previous conversation thread. The implementer retains context of what it tried and gets the verifier's feedback prepended to its prompt.
+The runtime itself is not an LLM — it's a Python script that reads reports, applies verdicts (keep or revert), and decides which role runs next. If multiple independent tasks are ready, implementers run in parallel. If a task is reverted, the implementer retries in its existing conversation thread with the verifier's feedback.
 
 ## What It Writes
 
