@@ -8,7 +8,7 @@ It splits the job into three roles:
 - **implementer**: writes the code
 - **verifier**: checks the exact code change
 
-A small runtime script keeps the loop running in the background.
+A small runtime script keeps the loop running in the background, communicating with Codex via the `codex app-server` JSON-RPC protocol.
 
 If you want Codex to work through a project over time instead of trying to do everything in one giant session, this is what `harness` is for.
 
@@ -24,16 +24,25 @@ ln -sfn /absolute/path/to/harness ~/.codex/skills/harness
 Then start a fresh Codex session and say what you want:
 
 ```text
-$harness
-Build a Python notes CLI and run it in background mode.
+$harness Build a Python notes CLI
 ```
 
-From there the planner should:
+The planner will interactively define the goal, scope, and task DAG with you. Once you approve:
 
-- scan the repo
-- create `plan.md` and `tasks.json`
-- decide what task is ready first
-- hand tasks to the implementer and verifier until the work is done
+```text
+$harness run
+```
+
+The runtime launches in the background and works through the tasks autonomously.
+
+## Modes
+
+| Command | What it does |
+|---|---|
+| `$harness <goal>` | Interactive planning — define scope, create task DAG |
+| `$harness run` | Launch the background runtime |
+| `$harness status` | Check progress |
+| `$harness stop` | Stop the runtime |
 
 ## The Loop
 
@@ -46,95 +55,66 @@ flowchart TD
     E --> F[Verifier]
     F --> G{Verdict}
     G -->|accept| C
-    G -->|revert| C
+    G -->|revert| D
     C -->|empty| H[Done]
 ```
 
-That is the whole idea:
+- The planner creates the task DAG with dependencies and acceptance criteria.
+- The implementer works one task and creates a trial commit.
+- The verifier evaluates that exact commit against the acceptance criteria.
+- The runtime applies the verdict (keep or revert) and moves to the next task.
+- If multiple independent tasks are ready, implementers run in parallel.
+- If a task is reverted, the implementer retries with the verifier's feedback (resuming the same conversation thread).
+- The loop continues until all tasks are done or it reaches `needs_human`.
 
-- the planner makes the task list
-- the implementer does one task
-- the verifier checks that exact commit
-- the runtime either keeps it or reverts it
-- then the loop continues until the work is done
+## How It Works
 
-## Why The Roles Are Split
+Each role runs as a separate Codex turn via the `codex app-server` JSON-RPC protocol. Roles get isolated context windows (separate threads) and return structured reports enforced by `outputSchema`.
 
-The point of the harness is not complexity for its own sake.
+The runtime is not an LLM — it's a Python script that reads reports, applies state transitions, and decides which role runs next.
 
-It separates three jobs that are easy to blur together in long runs:
+### Role Prompts
 
-- planning the work
-- writing the code
-- checking whether the code should stay
+Each role gets a prompt with its assignment and constraints:
 
-That makes background runs easier to inspect and easier to resume.
+- **Planner**: reads the repo and existing plan, creates/updates `plan.md` and `tasks.json`. Cannot write product code.
+- **Implementer**: gets one task with acceptance criteria, makes code changes, creates a single trial commit. Cannot edit `tasks.json`.
+- **Verifier**: evaluates the exact trial commit, checks acceptance criteria, runs validation. Returns `accept`, `revert`, or `needs_human`. Cannot modify code.
 
-Foreground/manual same-session role switching is intentionally unsupported. The harness is a background-only workflow because planner, implementer, and verifier must remain separate fresh-context turns.
+Reports are returned as structured JSON via `outputSchema` (schemas in `schemas/*.schema.json`), not written to disk by the roles.
 
-## What Happens In A Real Run
+### Parallel Execution
 
-In a normal run:
+When the planner creates multiple tasks with no mutual dependencies, the runtime runs implementers concurrently — one app-server process per task.
 
-1. the planner writes the first plan and task list
-2. the implementer works one ready task and creates a trial commit
-3. the verifier checks that exact commit
-4. the runtime keeps or reverts it
-5. the planner continues until the task list is empty
+### Thread Resume
 
-The planner can also expand or reorder the task list if the run discovers new work.
+When the verifier reverts a task and the implementer retries, the runtime resumes the implementer's previous conversation thread. The implementer retains context of what it tried and gets the verifier's feedback prepended to its prompt.
 
 ## What It Writes
 
-The harness writes a few files into the repo it is working on:
+The harness writes these files into the target repo:
 
-- `tasks.json`
-- `plan.md`
-- `harness-state.json`
-- `harness-events.tsv`
-- `reports/*.json`
-
-These files are how the roles hand work to each other.
-
-In practice:
-
-- `tasks.json` is the task list
-- `plan.md` is the human-readable plan
-- `harness-state.json` is the current snapshot of the run
-- `harness-events.tsv` is the audit log
-- `reports/*.json` are the handoff reports from planner, implementer, and verifier
-
-## Background Runs
-
-The harness runs in the background, which means:
-
-- you can start the run and leave
-- the runtime keeps launching fresh Codex turns
-- you can come back later and inspect what happened
-
-The runtime writes:
-
-- `harness-runtime.json`
-- `harness-runtime.log`
-
-Those are the main files to check when a run is still active or if you want to see why it stopped.
-
-## Example
-
-```text
-$harness
-Build a Python notes CLI and run it in background mode.
-```
-
-The expected flow is:
-
-- planner creates the task list
-- implementer works one task at a time
-- verifier accepts or reverts each commit
-- runtime keeps going until the task list is complete
+| File | Purpose |
+|---|---|
+| `tasks.json` | Canonical task DAG |
+| `plan.md` | Human-readable plan |
+| `harness-state.json` | Current run snapshot (role, task, attempt) |
+| `harness-events.tsv` | Append-only audit log |
+| `harness-launch.json` | Launch config (goal, scope, policy) |
+| `harness-runtime.json` | Runtime status (PID, last decision) |
+| `harness-runtime.log` | Stdout/stderr from the background process |
+| `harness-servers.json` | App-server PIDs for crash recovery |
+| `harness-lessons.md` | Cross-run strategic memory |
+| `reports/*.json` | Role handoff reports |
 
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v
+cd /path/to/harness
+PYTHONPATH=scripts python3 -m pytest tests/ -v
 ```
+
+## Development
+
+See [AGENTS.md](AGENTS.md) for internal development documentation, including app-server protocol gotchas, schema requirements, and known limitations.
