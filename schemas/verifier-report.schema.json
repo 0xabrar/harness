@@ -8,9 +8,47 @@
     "commit": {"type": "string"},
     "verdict": {"type": "string", "enum": ["accept", "revert", "needs_human"]},
     "summary": {"type": "string"},
-    "findings": {"type": "array"},
-    "criteria_results": {"type": "array"},
-    "proposed_tasks": {"type": "array"}
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["description", "severity", "file", "recommendation"],
+        "properties": {
+          "description": {"type": "string"},
+          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+          "file": {"type": "string"},
+          "recommendation": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "criteria_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["criterion", "result", "evidence"],
+        "properties": {
+          "criterion": {"type": "string"},
+          "result": {"type": "string", "enum": ["pass", "fail", "skip"]},
+          "evidence": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "proposed_tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "reason", "depends_on", "introduced_by"],
+        "properties": {
+          "title": {"type": "string"},
+          "reason": {"type": "string"},
+          "depends_on": {"type": "array", "items": {"type": "string"}},
+          "introduced_by": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

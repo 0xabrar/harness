@@ -9,7 +9,20 @@
     "summary": {"type": "string"},
     "files_changed": {"type": "array", "items": {"type": "string"}},
     "checks_run": {"type": "array", "items": {"type": "string"}},
-    "proposed_tasks": {"type": "array"}
+    "proposed_tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "reason", "depends_on", "introduced_by"],
+        "properties": {
+          "title": {"type": "string"},
+          "reason": {"type": "string"},
+          "depends_on": {"type": "array", "items": {"type": "string"}},
+          "introduced_by": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

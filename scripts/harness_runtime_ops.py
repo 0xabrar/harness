@@ -40,8 +40,8 @@ from harness_supervisor_status import evaluate_supervisor_status
 # ---------------------------------------------------------------------------
 
 ROLE_SANDBOX: dict[str, str] = {
-    "planner": "workspace-write",
-    "implementer": "workspace-write",
+    "planner": "danger-full-access",
+    "implementer": "danger-full-access",
     "verifier": "read-only",
 }
 

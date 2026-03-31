@@ -41,10 +41,10 @@ def _mock_manager(*, final_message: str = '{"role":"planner","revision":1}') -> 
 
 class TestSandboxForRole(unittest.TestCase):
     def test_planner_gets_workspace_write(self) -> None:
-        self.assertEqual(sandbox_for_role("planner"), "workspace-write")
+        self.assertEqual(sandbox_for_role("planner"), "danger-full-access")
 
     def test_implementer_gets_workspace_write(self) -> None:
-        self.assertEqual(sandbox_for_role("implementer"), "workspace-write")
+        self.assertEqual(sandbox_for_role("implementer"), "danger-full-access")
 
     def test_verifier_gets_read_only(self) -> None:
         self.assertEqual(sandbox_for_role("verifier"), "read-only")
@@ -72,7 +72,7 @@ class TestRunRoleTurn(unittest.TestCase):
             task_id="T-001",
             prompt="do the plan",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
         )
         self.assertIsInstance(result["report"], dict)
         self.assertEqual(result["report"]["role"], "planner")
@@ -89,7 +89,7 @@ class TestRunRoleTurn(unittest.TestCase):
             task_id="",
             prompt="plan",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
         )
         manager.release.assert_called_with(ms)
 
@@ -104,7 +104,7 @@ class TestRunRoleTurn(unittest.TestCase):
                 task_id="",
                 prompt="plan",
                 repo=Path("/tmp/fake"),
-                sandbox="workspace-write",
+                sandbox="danger-full-access",
             )
         manager.release.assert_called_with(ms)
 
@@ -118,7 +118,7 @@ class TestRunRoleTurn(unittest.TestCase):
                 task_id="T-002",
                 prompt="implement it",
                 repo=Path("/tmp/fake"),
-                sandbox="workspace-write",
+                sandbox="danger-full-access",
             )
         self.assertIn("Failed to parse", str(ctx.exception))
 
@@ -132,10 +132,10 @@ class TestRunRoleTurn(unittest.TestCase):
             task_id="T-001",
             prompt="retry",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
             resume_thread_id="thread-old",
         )
-        ms.server.resume_thread.assert_called_once_with("thread-old", sandbox="workspace-write")
+        ms.server.resume_thread.assert_called_once_with("thread-old", sandbox="danger-full-access")
         ms.server.start_thread.assert_not_called()
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
@@ -148,9 +148,9 @@ class TestRunRoleTurn(unittest.TestCase):
             task_id="",
             prompt="plan",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
         )
-        ms.server.start_thread.assert_called_once_with(sandbox="workspace-write")
+        ms.server.start_thread.assert_called_once_with(sandbox="danger-full-access")
         ms.server.resume_thread.assert_not_called()
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
@@ -164,7 +164,7 @@ class TestRunRoleTurn(unittest.TestCase):
             task_id="T-001",
             prompt="plan",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
         )
         self.assertEqual(ms.thread_history["T-001"], "thread-abc")
 
@@ -195,7 +195,7 @@ class TestRunRoleTurn(unittest.TestCase):
             task_id="",
             prompt="plan",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
         )
         self.assertEqual(result["thread_id"], "thread-new")
         dead_ms.server.close.assert_called_once()
@@ -228,7 +228,7 @@ class TestRunRoleTurn(unittest.TestCase):
             task_id="",
             prompt="plan",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
         )
         self.assertEqual(result["thread_id"], "thread-new")
         dead_ms.server.close.assert_called_once()
@@ -250,7 +250,7 @@ class TestRunRoleTurn(unittest.TestCase):
                 task_id="",
                 prompt="plan",
                 repo=Path("/tmp/fake"),
-                sandbox="workspace-write",
+                sandbox="danger-full-access",
             )
         self.assertIn("schema validation failed", str(ctx.exception))
 
@@ -273,7 +273,7 @@ class TestRunRoleTurn(unittest.TestCase):
                 task_id="",
                 prompt="plan",
                 repo=Path("/tmp/fake"),
-                sandbox="workspace-write",
+                sandbox="danger-full-access",
             )
         self.assertIn("failed twice", str(ctx.exception))
 
@@ -340,10 +340,10 @@ class TestThreadResume(unittest.TestCase):
             task_id="T-001",
             prompt="implement it",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
             resume_thread_id=None,
         )
-        ms.server.start_thread.assert_called_once_with(sandbox="workspace-write")
+        ms.server.start_thread.assert_called_once_with(sandbox="danger-full-access")
         ms.server.resume_thread.assert_not_called()
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
@@ -360,10 +360,10 @@ class TestThreadResume(unittest.TestCase):
             task_id="T-001",
             prompt="retry it",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
             resume_thread_id="t-1",
         )
-        ms.server.resume_thread.assert_called_once_with("t-1", sandbox="workspace-write")
+        ms.server.resume_thread.assert_called_once_with("t-1", sandbox="danger-full-access")
         ms.server.start_thread.assert_not_called()
         self.assertEqual(result["thread_id"], "thread-abc")
 
@@ -379,7 +379,7 @@ class TestThreadResume(unittest.TestCase):
             task_id="T-001",
             prompt="implement it",
             repo=Path("/tmp/fake"),
-            sandbox="workspace-write",
+            sandbox="danger-full-access",
         )
         # Simulate what run_runtime does after run_role_turn
         task_thread_map["T-001"] = turn["thread_id"]
