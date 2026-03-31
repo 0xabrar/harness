@@ -305,6 +305,7 @@ def run_runtime(args: argparse.Namespace) -> int:
 
     task_thread_map: dict[str, str] = {}  # task_id -> last thread_id
     last_verifier_feedback: str = ""  # verifier summary from the most recent revert
+    supervisor_lock = threading.Lock()
 
     while True:
         gate = evaluate_launch_context(repo=paths.repo, ignore_running_runtime=True)
@@ -366,7 +367,8 @@ def run_runtime(args: argparse.Namespace) -> int:
                 task_thread_map[task_id] = turn["thread_id"]
 
             report = turn["report"]
-            decision = evaluate_supervisor_status(repo=paths.repo, report_override=report)
+            with supervisor_lock:
+                decision = evaluate_supervisor_status(repo=paths.repo, report_override=report)
         except (HarnessError, AppServerError, OSError) as exc:
             runtime["status"] = "needs_human"
             runtime["terminal_reason"] = str(exc)
@@ -430,9 +432,10 @@ def run_runtime(args: argparse.Namespace) -> int:
 
                     par_report = results[task_id]["report"]
                     try:
-                        par_decision = evaluate_supervisor_status(
-                            repo=paths.repo, report_override=par_report
-                        )
+                        with supervisor_lock:
+                            par_decision = evaluate_supervisor_status(
+                                repo=paths.repo, report_override=par_report
+                            )
                     except (HarnessError, AppServerError) as exc:
                         runtime["status"] = "needs_human"
                         runtime["terminal_reason"] = str(exc)
