@@ -39,16 +39,24 @@ from harness_supervisor_status import evaluate_supervisor_status
 # Sandbox mapping: role -> app-server sandbox mode
 # ---------------------------------------------------------------------------
 
-ROLE_SANDBOX: dict[str, str] = {
-    "planner": "danger-full-access",
-    "implementer": "danger-full-access",
-    "verifier": "read-only",
+_POLICY_SANDBOX: dict[str, dict[str, str]] = {
+    "danger_full_access": {
+        "planner": "danger-full-access",
+        "implementer": "danger-full-access",
+        "verifier": "danger-full-access",
+    },
+    "workspace_write": {
+        "planner": "workspace-write",
+        "implementer": "workspace-write",
+        "verifier": "read-only",
+    },
 }
 
 
-def sandbox_for_role(role: str) -> str:
-    """Return the app-server sandbox mode for *role*."""
-    return ROLE_SANDBOX.get(role, "read-only")
+def sandbox_for_role(role: str, execution_policy: str = "danger_full_access") -> str:
+    """Return the app-server sandbox mode for *role* under *execution_policy*."""
+    policy_map = _POLICY_SANDBOX.get(execution_policy, _POLICY_SANDBOX["danger_full_access"])
+    return policy_map.get(role, "read-only")
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +69,7 @@ def _run_parallel_implementers(
     ready_tasks: list[dict],
     paths: Paths,
     runtime: dict,
+    execution_policy: str = "danger_full_access",
 ) -> tuple[dict[str, dict], dict[str, str]]:
     """Run implementers for multiple independent tasks concurrently.
 
@@ -81,7 +90,7 @@ def _run_parallel_implementers(
                 task_id=task_id,
                 prompt=prompt,
                 repo=paths.repo,
-                sandbox=sandbox_for_role("implementer"),
+                sandbox=sandbox_for_role("implementer", execution_policy),
             )
             results[task_id] = turn
         except Exception as exc:
@@ -149,7 +158,7 @@ def run_role_turn(
                 if retried:
                     raise HarnessError(f"App-server connection failed twice for role {role!r}")
                 retried = True
-                # Remove dead server, acquire a fresh one
+                resume_thread_id = None  # can't resume on a fresh server
                 try:
                     ms.server.close()
                 except Exception:
@@ -162,6 +171,7 @@ def run_role_turn(
                 if retried:
                     raise HarnessError(f"App-server connection failed twice for role {role!r}")
                 retried = True
+                resume_thread_id = None  # can't resume on a fresh server
                 try:
                     ms.server.close()
                 except Exception:
@@ -349,7 +359,7 @@ def run_runtime(args: argparse.Namespace) -> int:
                 task_id=task_id,
                 prompt=prompt_text,
                 repo=paths.repo,
-                sandbox=sandbox_for_role(role),
+                sandbox=sandbox_for_role(role, execution_policy),
                 resume_thread_id=resume_id,
             )
 
@@ -386,6 +396,7 @@ def run_runtime(args: argparse.Namespace) -> int:
                         ready_tasks=ready,
                         paths=paths,
                         runtime=runtime,
+                        execution_policy=execution_policy,
                     )
                 except (HarnessError, AppServerError) as exc:
                     runtime["status"] = "needs_human"

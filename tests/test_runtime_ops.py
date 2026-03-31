@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from harness_app_server import AppServerError
 from harness_artifacts import HarnessError
-from harness_runtime_ops import ROLE_SANDBOX, run_role_turn, sandbox_for_role
+from harness_runtime_ops import run_role_turn, sandbox_for_role
 
 
 # ---------------------------------------------------------------------------
@@ -40,22 +40,21 @@ def _mock_manager(*, final_message: str = '{"role":"planner","revision":1}') -> 
 # ---------------------------------------------------------------------------
 
 class TestSandboxForRole(unittest.TestCase):
-    def test_planner_gets_workspace_write(self) -> None:
+    def test_danger_policy_all_roles_get_full_access(self) -> None:
+        self.assertEqual(sandbox_for_role("planner", "danger_full_access"), "danger-full-access")
+        self.assertEqual(sandbox_for_role("implementer", "danger_full_access"), "danger-full-access")
+        self.assertEqual(sandbox_for_role("verifier", "danger_full_access"), "danger-full-access")
+
+    def test_workspace_write_policy(self) -> None:
+        self.assertEqual(sandbox_for_role("planner", "workspace_write"), "workspace-write")
+        self.assertEqual(sandbox_for_role("implementer", "workspace_write"), "workspace-write")
+        self.assertEqual(sandbox_for_role("verifier", "workspace_write"), "read-only")
+
+    def test_default_policy_is_danger(self) -> None:
         self.assertEqual(sandbox_for_role("planner"), "danger-full-access")
-
-    def test_implementer_gets_workspace_write(self) -> None:
-        self.assertEqual(sandbox_for_role("implementer"), "danger-full-access")
-
-    def test_verifier_gets_read_only(self) -> None:
-        self.assertEqual(sandbox_for_role("verifier"), "read-only")
 
     def test_unknown_role_defaults_to_read_only(self) -> None:
         self.assertEqual(sandbox_for_role("unknown"), "read-only")
-
-    def test_role_sandbox_dict_has_all_known_roles(self) -> None:
-        self.assertIn("planner", ROLE_SANDBOX)
-        self.assertIn("implementer", ROLE_SANDBOX)
-        self.assertIn("verifier", ROLE_SANDBOX)
 
 
 # ---------------------------------------------------------------------------
