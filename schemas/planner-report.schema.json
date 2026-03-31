@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "required": ["role", "revision", "summary", "task_changes", "planner_requested_reason"],
+  "properties": {
+    "role": {"type": "string", "const": "planner"},
+    "revision": {"type": "integer"},
+    "summary": {"type": "string"},
+    "task_changes": {
+      "type": "object",
+      "required": ["added", "updated", "closed"],
+      "properties": {
+        "added": {"type": "array", "items": {"type": "string"}},
+        "updated": {"type": "array", "items": {"type": "string"}},
+        "closed": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "planner_requested_reason": {"type": "string"}
+  },
+  "additionalProperties": false
+}

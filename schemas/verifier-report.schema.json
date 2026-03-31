@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "required": ["role", "task_id", "attempt", "commit", "verdict", "summary", "findings", "criteria_results", "proposed_tasks"],
+  "properties": {
+    "role": {"type": "string", "const": "verifier"},
+    "task_id": {"type": "string"},
+    "attempt": {"type": "integer"},
+    "commit": {"type": "string"},
+    "verdict": {"type": "string", "enum": ["accept", "revert", "needs_human"]},
+    "summary": {"type": "string"},
+    "findings": {"type": "array"},
+    "criteria_results": {"type": "array"},
+    "proposed_tasks": {"type": "array"}
+  },
+  "additionalProperties": false
+}
