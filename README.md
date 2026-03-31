@@ -12,6 +12,12 @@ A small runtime script keeps the loop running in the background, communicating w
 
 If you want Codex to work through a project over time instead of trying to do everything in one giant session, this is what `harness` is for.
 
+## Warning
+
+By default, the harness runs all roles with `danger-full-access` sandbox mode, which disables Codex's sandbox entirely. This gives the agents full access to your filesystem and network. Only run the harness on repos and machines where you're comfortable with that.
+
+To use a restricted sandbox, set `execution_policy: workspace_write` in the launch config.
+
 ## Quick Start
 
 Install it as a local Codex skill:
