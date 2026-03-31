@@ -16,7 +16,6 @@ EVENT_HEADER = ["seq", "timestamp", "role", "task_id", "attempt", "commit", "sta
 ROLE_CHOICES = ("planner", "implementer", "verifier")
 TASK_STATUS_CHOICES = ("pending", "ready", "in_progress", "blocked", "done", "failed")
 RUNTIME_STATUS_CHOICES = ("idle", "running", "stopped", "terminal", "needs_human")
-EXECUTION_POLICY_CHOICES = ("workspace_write", "danger_full_access")
 DEFAULT_EXECUTION_POLICY = "danger_full_access"
 
 
@@ -330,6 +329,14 @@ def next_ready_task(tasks_payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
     ready.sort(key=lambda task: (int(task.get("priority", 100)), str(task["id"])))
     return deepcopy(ready[0])
+
+
+def all_ready_tasks(tasks_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return all tasks with status 'ready', sorted by priority then id."""
+    payload = refresh_ready_tasks(tasks_payload)
+    ready = [task for task in payload["tasks"] if task["status"] == "ready"]
+    ready.sort(key=lambda task: (int(task.get("priority", 100)), str(task["id"])))
+    return [deepcopy(t) for t in ready]
 
 
 def all_tasks_done(tasks_payload: dict[str, Any]) -> bool:

@@ -1,5 +1,12 @@
 # Role Contracts
 
+Each role returns its report as structured JSON as its final response. The runtime captures it via the app-server `outputSchema` mechanism.
+
+## Sandbox Modes
+
+- **planner** and **implementer**: `workspace-write` -- they need to modify files in the target repo.
+- **verifier**: `read-only` -- it must not alter the commit under review.
+
 ## Planner
 
 The planner owns:
@@ -43,6 +50,10 @@ The implementer must not:
 - accept or revert its own commit,
 - continue to a second task in the same turn.
 
+### Thread Resume for Retries
+
+When a verifier reverts an implementer's attempt, the runtime resumes the same app-server thread (via `thread_id`) so the implementer retains context from its previous attempt. The verifier's feedback is prepended to the resumed prompt.
+
 ## Verifier
 
 The verifier evaluates:
@@ -74,3 +85,5 @@ The runtime owns:
 - state/events/lessons updates.
 
 The runtime may update task execution-state fields after implementer/verifier turns, but it must not change task topology. It must stay deterministic and artifact-driven.
+
+The runtime communicates with Codex exclusively through the app-server JSON-RPC protocol. It selects the sandbox mode per role (see above) and enforces report schemas via `outputSchema` on each `turn/start` request.

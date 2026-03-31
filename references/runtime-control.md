@@ -7,7 +7,7 @@ The runtime control plane is a dumb script layer modeled after `codex-autoresear
 - status
 - stop
 - detached background execution
-- fresh `codex exec` role turns
+- app-server JSON-RPC role turns
 - artifact consistency checks
 - `needs_human` transitions
 
@@ -22,7 +22,7 @@ The runtime:
 3. Starts the detached process for background mode.
 4. Chooses the next role from the current artifact state.
 5. Builds the role prompt.
-6. Launches a fresh `codex exec` session for that role.
+6. Sends a `turn/start` request to the app-server for that role (with the appropriate sandbox mode and `outputSchema`).
 7. Applies verifier verdicts (`accept` or `revert`).
 8. Updates `harness-runtime.json`, `harness-state.json`, `harness-events.tsv`, and `harness-lessons.md`.
 9. Transitions to `needs_human` if progress is unsafe or inconsistent.
@@ -37,6 +37,19 @@ The runtime must not:
 - replace the planner,
 - replace the verifier.
 
+## App-Server Lifecycle (ServerManager)
+
+The runtime manages Codex app-server processes through a `ServerManager`:
+
+1. **Lazy spawn:** An app-server process is started on-demand when the first role turn is needed. The runtime does not pre-start servers.
+2. **Idle reap:** Servers that have been idle for 5 minutes are automatically reaped to free resources.
+3. **Signal/atexit cleanup:** On SIGTERM, SIGINT, or normal process exit, the runtime shuts down all managed servers.
+4. **`harness-servers.json` orphan cleanup:** Each managed server's PID is recorded in `harness-servers.json` in the target repo. On startup, the runtime reads this file and kills any stale PIDs left by a previous crashed run before proceeding. The file is removed on clean shutdown.
+
+## Parallel Execution
+
+When the planner produces multiple independent tasks (i.e. tasks whose dependencies are all satisfied), the runtime runs implementer turns concurrently -- one app-server turn per task. Results are collected and each task proceeds independently to verification.
+
 ## Background Model
 
 The detached runtime should:
@@ -44,7 +57,7 @@ The detached runtime should:
 1. Run with `stdin=DEVNULL`.
 2. Append stdout/stderr to `harness-runtime.log`.
 3. Persist pid/pgid and terminal reason in `harness-runtime.json`.
-4. Relaunch fresh Codex turns until a terminal state is reached.
+4. Send role turns via the app-server JSON-RPC protocol until a terminal state is reached.
 
 ## Canonical Decisions
 

@@ -6,11 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from harness_artifacts import (
-    DEFAULT_EXECUTION_POLICY,
-    EXECUTION_POLICY_CHOICES,
     HarnessError,
     Paths,
-    default_paths,
     read_json,
     utc_now,
     write_json_atomic,
@@ -45,16 +42,6 @@ def ensure_runtime_not_running(paths: Paths) -> None:
     runtime = load_runtime(paths.runtime)
     if runtime and pid_is_alive(runtime.get("pid")):
         raise HarnessError("A harness runtime is already active for this repo.")
-
-
-def codex_args_for_execution_policy(execution_policy: str | None, *, extra_args: list[str] | None = None) -> list[str]:
-    policy = execution_policy or DEFAULT_EXECUTION_POLICY
-    if policy not in EXECUTION_POLICY_CHOICES:
-        raise HarnessError(f"Unsupported execution policy: {policy!r}")
-    extras = list(extra_args or [])
-    if policy == "workspace_write":
-        return ["--full-auto", *extras]
-    return ["--dangerously-bypass-approvals-and-sandbox", *extras]
 
 
 def runtime_summary(paths: Paths) -> dict[str, Any]:

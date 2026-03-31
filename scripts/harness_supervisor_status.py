@@ -49,22 +49,21 @@ def _append_summary_lesson(paths, state_payload: dict[str, Any], outcome: str, i
 
 
 def revert_trial_commit(repo: Path, trial_commit: str) -> None:
-    head = git_head_commit(repo)
-    if head == trial_commit:
-        completed = subprocess.run(["git", "-C", str(repo), "reset", "--hard", "HEAD~1"], text=True, capture_output=True, check=False)
-        if completed.returncode == 0:
-            return
     completed = subprocess.run(["git", "-C", str(repo), "revert", "--no-edit", trial_commit], text=True, capture_output=True, check=False)
     if completed.returncode != 0:
         raise HarnessError(completed.stderr.strip() or f"Failed to revert commit {trial_commit}")
 
 
-def planner_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any]) -> dict[str, Any]:
+def planner_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any], *, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
     current_revision = int(state_payload["state"].get("planner_revision", 0))
     report_path = report_path_for_role(paths, "planner", planner_revision=current_revision + 1)
-    if not report_path.exists():
-        raise HarnessError(f"Planner report missing: {report_path}")
-    report = read_json(report_path)
+    if report_override is not None:
+        report = report_override
+        write_json_atomic(report_path, report)  # persist for audit
+    else:
+        if not report_path.exists():
+            raise HarnessError(f"Planner report missing: {report_path}")
+        report = read_json(report_path)
     revision = max(
         int(tasks_payload.get("planner_revision", 0)),
         int(report.get("revision") or report.get("plan_revision") or (current_revision + 1)),
@@ -97,15 +96,19 @@ def planner_report_state(paths, state_payload: dict[str, Any], tasks_payload: di
     return {"decision": "relaunch", "reason": "dispatch_implementer", "report": report, "tasks": tasks_payload}
 
 
-def implementer_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any]) -> dict[str, Any]:
+def implementer_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any], *, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
     task_id = str(state_payload["state"].get("current_task_id") or "")
     attempt = int(state_payload["state"].get("current_attempt") or 0)
     if not task_id or not attempt:
         raise HarnessError("Implementer state is missing current task or attempt.")
     report_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
-    if not report_path.exists():
-        raise HarnessError(f"Implementer report missing: {report_path}")
-    report = read_json(report_path)
+    if report_override is not None:
+        report = report_override
+        write_json_atomic(report_path, report)  # persist for audit
+    else:
+        if not report_path.exists():
+            raise HarnessError(f"Implementer report missing: {report_path}")
+        report = read_json(report_path)
     commit = str(report.get("commit") or report.get("trial_commit") or "")
     if not commit:
         raise HarnessError("Implementer report must include a commit.")
@@ -124,7 +127,7 @@ def implementer_report_state(paths, state_payload: dict[str, Any], tasks_payload
     return {"decision": "relaunch", "reason": "dispatch_verifier", "report": report, "tasks": tasks_payload}
 
 
-def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any]) -> dict[str, Any]:
+def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any], *, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
     task_id = str(state_payload["state"].get("current_task_id") or "")
     attempt = int(state_payload["state"].get("current_attempt") or 0)
     trial_commit = str(state_payload["state"].get("trial_commit") or "")
@@ -132,9 +135,13 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
         raise HarnessError("Verifier state is missing current task, attempt, or trial commit.")
     verdict_path = report_path_for_role(paths, "verifier", task_id=task_id, attempt=attempt)
     impl_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
-    if not verdict_path.exists():
-        raise HarnessError(f"Verifier report missing: {verdict_path}")
-    verdict = read_json(verdict_path)
+    if report_override is not None:
+        verdict = report_override
+        write_json_atomic(verdict_path, verdict)  # persist for audit
+    else:
+        if not verdict_path.exists():
+            raise HarnessError(f"Verifier report missing: {verdict_path}")
+        verdict = read_json(verdict_path)
     implementer = read_json(impl_path)
     index = task_index(tasks_payload)
     task = index[task_id]
@@ -201,6 +208,16 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
     state_payload["state"]["reverts"] += 1
     state_payload["state"]["trial_commit"] = ""
     task["last_verdict"] = "revert"
+    append_lesson(
+        path=paths.lessons,
+        title=f"Reverted task {task_id} attempt {attempt}",
+        category="task",
+        strategy=str(implementer.get("summary") or f"Attempt {attempt} for {task_id}"),
+        outcome="revert",
+        insight=str(verdict.get("summary") or "Verifier rejected the trial commit."),
+        context=context_string(state_payload),
+        iteration=str(state_payload["state"].get("seq", 0) + 1),
+    )
     max_attempts = int(state_payload["config"].get("max_task_attempts", 3))
     if int(task.get("attempts", 0)) >= max_attempts:
         task["status"] = "failed"
@@ -234,7 +251,7 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
     return {"decision": "relaunch", "reason": "retry_task", "report": verdict, "tasks": tasks_payload}
 
 
-def evaluate_supervisor_status(*, repo: str | Path | None = None) -> dict[str, Any]:
+def evaluate_supervisor_status(*, repo: str | Path | None = None, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
     paths = default_paths(repo)
     state_payload = read_json(paths.state)
     tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
@@ -245,11 +262,11 @@ def evaluate_supervisor_status(*, repo: str | Path | None = None) -> dict[str, A
     original_trial_commit = str(state_payload["state"].get("trial_commit") or "")
 
     if role == "planner":
-        outcome = planner_report_state(paths, state_payload, tasks_payload)
+        outcome = planner_report_state(paths, state_payload, tasks_payload, report_override=report_override)
     elif role == "implementer":
-        outcome = implementer_report_state(paths, state_payload, tasks_payload)
+        outcome = implementer_report_state(paths, state_payload, tasks_payload, report_override=report_override)
     elif role == "verifier":
-        outcome = verifier_report_state(paths, state_payload, tasks_payload)
+        outcome = verifier_report_state(paths, state_payload, tasks_payload, report_override=report_override)
     else:
         raise HarnessError(f"Unsupported current role in state: {role!r}")
 

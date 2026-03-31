@@ -32,19 +32,16 @@ def build_parser() -> argparse.ArgumentParser:
             continue
         launch._add_action(arg)
     launch.add_argument("--codex-bin", default="codex")
-    launch.add_argument("--codex-arg", action="append", default=[])
     launch.add_argument("--sleep-seconds", type=int, default=5)
 
     start = sub.add_parser("start")
     start.add_argument("--repo")
     start.add_argument("--codex-bin", default="codex")
-    start.add_argument("--codex-arg", action="append", default=[])
     start.add_argument("--sleep-seconds", type=int, default=5)
 
     run = sub.add_parser("run")
     run.add_argument("--repo")
     run.add_argument("--codex-bin", default="codex")
-    run.add_argument("--codex-arg", action="append", default=[])
     run.add_argument("--sleep-seconds", type=int, default=5)
 
     status = sub.add_parser("status")

@@ -2,6 +2,8 @@
 
 Role reports are the canonical handoff format between Codex turns.
 
+Schemas are enforced at runtime via the `outputSchema` parameter on each `turn/start` request. The canonical schema definitions live in `schemas/*.schema.json` (one per role: `planner-report.schema.json`, `implementer-report.schema.json`, `verifier-report.schema.json`). The examples below are kept for quick reference.
+
 ## Planner Report
 
 ```json
