@@ -140,6 +140,10 @@ def run_role_turn(
                 schema = load_schema(role)
                 result = ms.server.run_turn(thread_id, prompt, output_schema=schema)
 
+                if result.get("status") != "completed":
+                    error_msg = result.get("error") or f"Turn ended with status: {result.get('status')}"
+                    raise HarnessError(f"{role} turn did not complete: {error_msg}")
+
                 ms.thread_history[key] = thread_id
 
                 parsed = parse_structured_output(result.get("final_message"))
