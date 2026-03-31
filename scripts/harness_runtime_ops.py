@@ -23,6 +23,7 @@ from harness_artifacts import (
     load_tasks,
     read_json,
     refresh_ready_tasks,
+    task_index,
     write_json_atomic,
 )
 from harness_init_run import initialize_run
@@ -149,6 +150,18 @@ def run_role_turn(
                     raise HarnessError(f"App-server connection failed twice for role {role!r}")
                 retried = True
                 # Remove dead server, acquire a fresh one
+                try:
+                    ms.server.close()
+                except Exception:
+                    pass
+                manager.release(ms)
+                ms = manager.acquire(key)
+            except AppServerError:
+                if ms.alive:
+                    raise  # logical error, not a transport failure
+                if retried:
+                    raise HarnessError(f"App-server connection failed twice for role {role!r}")
+                retried = True
                 try:
                     ms.server.close()
                 except Exception:
@@ -382,6 +395,8 @@ def run_runtime(args: argparse.Namespace) -> int:
                     return 2
 
                 # Process results sequentially — state transitions must be serial
+                tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
+                idx = task_index(tasks_payload)
                 for task in ready:
                     task_id = str(task["id"])
                     if task_id in errors:
@@ -392,6 +407,15 @@ def run_runtime(args: argparse.Namespace) -> int:
                         return 2
                     if task_id not in results:
                         continue
+
+                    # Set the correct task context so evaluate_supervisor_status
+                    # reads the right current_task_id / current_attempt / role.
+                    par_task = idx[task_id]
+                    state_payload = read_json(paths.state)
+                    state_payload["state"]["current_role"] = "implementer"
+                    state_payload["state"]["current_task_id"] = task_id
+                    state_payload["state"]["current_attempt"] = int(par_task.get("attempts", 0)) + 1
+                    write_json_atomic(paths.state, state_payload)
 
                     par_report = results[task_id]["report"]
                     try:

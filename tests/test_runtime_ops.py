@@ -201,6 +201,60 @@ class TestRunRoleTurn(unittest.TestCase):
         dead_ms.server.close.assert_called_once()
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
+    def test_retries_on_app_server_error_when_server_dead(self, _mock_schema: Any) -> None:
+        """When AppServerError is raised and the server process is dead, retry with a fresh server."""
+        manager = MagicMock()
+        dead_ms = MagicMock()
+        dead_ms.server.start_thread.side_effect = AppServerError("app-server connection closed")
+        dead_ms.alive = False
+        dead_ms.thread_history = {}
+
+        fresh_ms = MagicMock()
+        fresh_ms.server.start_thread.return_value = "thread-new"
+        fresh_ms.server.run_turn.return_value = {
+            "status": "completed",
+            "thread_id": "thread-new",
+            "final_message": '{"role":"planner","revision":1}',
+            "file_changes": [],
+            "command_executions": [],
+            "reasoning_summary": "",
+        }
+        fresh_ms.thread_history = {}
+
+        manager.acquire.side_effect = [dead_ms, fresh_ms]
+        result = run_role_turn(
+            manager=manager,
+            role="planner",
+            task_id="",
+            prompt="plan",
+            repo=Path("/tmp/fake"),
+            sandbox="workspace-write",
+        )
+        self.assertEqual(result["thread_id"], "thread-new")
+        dead_ms.server.close.assert_called_once()
+
+    @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
+    def test_app_server_error_reraised_when_server_alive(self, _mock_schema: Any) -> None:
+        """When AppServerError is raised but the server is still alive, re-raise immediately (logical error)."""
+        manager = MagicMock()
+        ms = MagicMock()
+        ms.server.start_thread.side_effect = AppServerError("schema validation failed", code=-32600)
+        ms.alive = True
+        ms.thread_history = {}
+        manager.acquire.return_value = ms
+
+        with self.assertRaises(AppServerError) as ctx:
+            run_role_turn(
+                manager=manager,
+                role="planner",
+                task_id="",
+                prompt="plan",
+                repo=Path("/tmp/fake"),
+                sandbox="workspace-write",
+            )
+        self.assertIn("schema validation failed", str(ctx.exception))
+
+    @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
     def test_raises_after_second_broken_pipe(self, _mock_schema: Any) -> None:
         """If the retry also fails with a connection error, raise HarnessError."""
         manager = MagicMock()
