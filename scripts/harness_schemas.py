@@ -120,9 +120,14 @@ def _validate_object(obj: Any, schema: dict[str, Any]) -> bool:
                 return False
         elif prop_type == "array" and isinstance(value, list):
             item_schema = prop_schema.get("items")
-            if item_schema and item_schema.get("type") == "object":
+            if item_schema:
+                item_type = item_schema.get("type")
+                expected = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "object": dict, "array": list}.get(item_type)
                 for item in value:
-                    if isinstance(item, dict) and not _validate_object(item, item_schema):
+                    if item_type == "object" and isinstance(item, dict):
+                        if not _validate_object(item, item_schema):
+                            return False
+                    elif expected and not isinstance(item, expected):
                         return False
 
     return True
