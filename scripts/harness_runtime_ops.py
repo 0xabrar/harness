@@ -367,7 +367,7 @@ def run_runtime(args: argparse.Namespace) -> int:
 
             report = turn["report"]
             decision = evaluate_supervisor_status(repo=paths.repo, report_override=report)
-        except (HarnessError, AppServerError) as exc:
+        except (HarnessError, AppServerError, OSError) as exc:
             runtime["status"] = "needs_human"
             runtime["terminal_reason"] = str(exc)
             persist_runtime(paths.runtime, runtime)
@@ -396,7 +396,7 @@ def run_runtime(args: argparse.Namespace) -> int:
                         runtime=runtime,
                         execution_policy=execution_policy,
                     )
-                except (HarnessError, AppServerError) as exc:
+                except (HarnessError, AppServerError, OSError) as exc:
                     runtime["status"] = "needs_human"
                     runtime["terminal_reason"] = str(exc)
                     persist_runtime(paths.runtime, runtime)
