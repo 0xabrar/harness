@@ -14,7 +14,7 @@ Dynamic long-running Codex workflow with three agent roles and a dumb runtime co
 - `planner`: user-facing before launch; owns `plan.md` and `tasks.json`; may add, split, reprioritize, and close tasks.
 - `implementer`: writes product code for one ready task and creates a trial commit.
 - `verifier`: evaluates the exact trial commit and returns `accept` or `revert`.
-- `runtime`: not an LLM role; launches detached Codex turns, applies verifier verdicts, updates artifacts, and manages resume/status/stop.
+- `runtime`: not an LLM role; communicates with Codex via the app-server JSON-RPC protocol, applies verifier verdicts, updates artifacts, and manages resume/status/stop. When the planner produces multiple independent tasks, the runtime runs implementers concurrently.
 
 ## When Activated
 
@@ -61,6 +61,7 @@ Dynamic long-running Codex workflow with three agent roles and a dumb runtime co
 - `harness-lessons.md`
 - `tasks.json`
 - `plan.md`
+- `harness-servers.json` (app-server PID tracking for orphan cleanup)
 - `reports/*.json`
 
 See [references/artifacts.md](references/artifacts.md) for schema and ownership rules.
