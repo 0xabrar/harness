@@ -1,6 +1,6 @@
 ---
 name: harness
-description: "Planner/implementer/verifier harness for long-running Codex work. Use when the user wants a dynamic task-DAG workflow with a human-facing planner, a coding implementer, a commit-level verifier, and a dumb runtime control plane that can run in the background and resume from structured artifacts."
+description: "Planner/implementer/verifier harness for long-running Codex work. Use when the user wants a dynamic task-DAG workflow with a human-facing planner, a coding implementer, a commit-level verifier, and a dumb runtime control plane that runs in the background and resumes from structured artifacts."
 metadata:
   short-description: "Run a planner/implementer/verifier harness"
 ---
@@ -43,10 +43,10 @@ Dynamic long-running Codex workflow with three agent roles and a dumb runtime co
 6. All role-to-role communication happens through artifacts in the target repo.
 7. `needs_human` is a safety valve, not a normal step in the loop.
 8. Use helper scripts for state/event/lessons updates whenever possible.
+9. Foreground/manual same-session runs are unsupported. The harness must execute as a background runtime with fresh role turns.
 
 ## Run Modes
 
-- `foreground`: planner or later role work stays in the current Codex session.
 - `background`: persist launch/runtime artifacts and start the detached runtime controller.
 - `status`: inspect the background runtime.
 - `stop`: stop the background runtime.

@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from harness_init_run import initialize_run  # noqa: E402
-from harness_artifacts import read_json  # noqa: E402
+from harness_artifacts import HarnessError, read_json  # noqa: E402
 
 
 class HarnessInitTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class HarnessInitTests(unittest.TestCase):
                 repo=repo,
                 goal="Build a harness",
                 scope=".",
-                session_mode="foreground",
+                session_mode="background",
                 execution_policy="danger_full_access",
                 force=True,
             )
@@ -40,7 +40,20 @@ class HarnessInitTests(unittest.TestCase):
             self.assertIn("seq\ttimestamp\trole", events)
             self.assertIn("Initialized harness state and working artifacts.", events)
 
+    def test_initialize_run_rejects_foreground_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                HarnessError, "Foreground mode is unsupported"
+            ):
+                initialize_run(
+                    repo=Path(tmp),
+                    goal="Build a harness",
+                    scope=".",
+                    session_mode="foreground",
+                    execution_policy="danger_full_access",
+                    force=True,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
-

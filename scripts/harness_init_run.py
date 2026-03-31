@@ -32,6 +32,8 @@ def initialize_run(
     max_task_attempts: int = 3,
     force: bool = False,
 ) -> dict[str, str]:
+    if session_mode != "background":
+        raise HarnessError("Foreground mode is unsupported. Use session_mode='background'.")
     paths = default_paths(repo)
     existing = [path for path in (paths.state, paths.events, paths.tasks, paths.plan) if path.exists()]
     if existing and not force:
@@ -86,7 +88,7 @@ def main() -> int:
     parser.add_argument("--repo")
     parser.add_argument("--goal", required=True)
     parser.add_argument("--scope", required=True)
-    parser.add_argument("--session-mode", choices=["foreground", "background"], default="foreground")
+    parser.add_argument("--session-mode", choices=["background"], default="background")
     parser.add_argument("--execution-policy", choices=["workspace_write", "danger_full_access"], default=DEFAULT_EXECUTION_POLICY)
     parser.add_argument("--run-tag", default="")
     parser.add_argument("--stop-condition", default="")

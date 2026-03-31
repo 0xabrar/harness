@@ -24,7 +24,7 @@ class LaunchGateTests(unittest.TestCase):
                 repo=tmp,
                 goal="Build a harness",
                 scope=".",
-                session_mode="foreground",
+                session_mode="background",
                 execution_policy="danger_full_access",
                 force=True,
             )
@@ -43,4 +43,3 @@ class LaunchGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

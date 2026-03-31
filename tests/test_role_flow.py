@@ -21,7 +21,7 @@ class RoleFlowTests(unittest.TestCase):
                 repo=tmp,
                 goal="Build a harness",
                 scope=".",
-                session_mode="foreground",
+                session_mode="background",
                 execution_policy="danger_full_access",
                 force=True,
             )
@@ -103,7 +103,7 @@ class RoleFlowTests(unittest.TestCase):
                 repo=tmp,
                 goal="Build a harness",
                 scope=".",
-                session_mode="foreground",
+                session_mode="background",
                 execution_policy="danger_full_access",
                 force=True,
             )

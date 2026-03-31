@@ -70,6 +70,8 @@ It separates three jobs that are easy to blur together in long runs:
 
 That makes background runs easier to inspect and easier to resume.
 
+Foreground/manual same-session role switching is intentionally unsupported. The harness is a background-only workflow because planner, implementer, and verifier must remain separate fresh-context turns.
+
 ## What Happens In A Real Run
 
 In a normal run:
@@ -104,7 +106,7 @@ In practice:
 
 ## Background Runs
 
-The harness can run in the background, which means:
+The harness runs in the background, which means:
 
 - you can start the run and leave
 - the runtime keeps launching fresh Codex turns
