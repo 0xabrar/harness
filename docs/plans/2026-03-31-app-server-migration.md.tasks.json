@@ -1,0 +1,16 @@
+{
+  "planPath": "docs/plans/2026-03-31-app-server-migration.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 0: Add JSON-RPC client for codex app-server", "status": "pending"},
+    {"id": 1, "subject": "Task 1: Add output schemas for role reports", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 2: Update role prompts for outputSchema delivery", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Update supervisor to read reports from turn results", "status": "pending", "blockedBy": [1]},
+    {"id": 4, "subject": "Task 4: Replace codex exec with app-server in runtime loop", "status": "pending", "blockedBy": [0, 2, 3]},
+    {"id": 5, "subject": "Task 5: Add parallel execution for independent ready tasks", "status": "pending", "blockedBy": [4]},
+    {"id": 6, "subject": "Task 6: Add thread resume for implementer retries", "status": "pending", "blockedBy": [4]},
+    {"id": 7, "subject": "Task 7: Update SKILL.md and reference docs", "status": "pending", "blockedBy": [5, 6]},
+    {"id": 8, "subject": "Task 8: Integration test for full runtime loop", "status": "pending", "blockedBy": [4]},
+    {"id": 9, "subject": "Task 9: Clean up dead code", "status": "pending", "blockedBy": [8]}
+  ],
+  "lastUpdated": "2026-03-31T00:00:00Z"
+}
