@@ -49,11 +49,6 @@ def _append_summary_lesson(paths, state_payload: dict[str, Any], outcome: str, i
 
 
 def revert_trial_commit(repo: Path, trial_commit: str) -> None:
-    head = git_head_commit(repo)
-    if head == trial_commit:
-        completed = subprocess.run(["git", "-C", str(repo), "reset", "--hard", "HEAD~1"], text=True, capture_output=True, check=False)
-        if completed.returncode == 0:
-            return
     completed = subprocess.run(["git", "-C", str(repo), "revert", "--no-edit", trial_commit], text=True, capture_output=True, check=False)
     if completed.returncode != 0:
         raise HarnessError(completed.stderr.strip() or f"Failed to revert commit {trial_commit}")
