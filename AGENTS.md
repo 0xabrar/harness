@@ -89,5 +89,5 @@ When a turn returns empty `final_message`, check the `error` field in the turn r
 
 - Unit tests mock `CodexAppServer` — they don't spawn real processes.
 - Integration tests in `test_integration.py` use real git repos in temp directories.
-- Run all tests: `cd /home/dev/code/harness && PYTHONPATH=scripts python3 -m pytest tests/ -v`
+- Run all tests: `cd /path/to/harness && PYTHONPATH=scripts python3 -m pytest tests/ -v`
 - The test for sandbox values (`TestSandboxForRole`) must be updated if you change `ROLE_SANDBOX` in `harness_runtime_ops.py`.
