@@ -8,7 +8,6 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -64,106 +63,48 @@ def sandbox_for_role(role: str, execution_policy: str = "danger_full_access") ->
 # Parallel implementer execution
 # ---------------------------------------------------------------------------
 
-def _run_parallel_task_pipelines(
+def _run_parallel_implementers(
     *,
     manager: ServerManager,
     ready_tasks: list[dict],
     paths: Paths,
     runtime: dict,
     execution_policy: str = "danger_full_access",
-    task_thread_map: dict[str, str],
-    supervisor_lock: threading.Lock,
 ) -> tuple[dict[str, dict], dict[str, str]]:
-    """Run full implement→verify pipelines for multiple tasks concurrently.
+    """Run implementers for multiple independent tasks concurrently.
 
-    Each task gets its own thread that runs the implementer, calls the
-    supervisor (under *supervisor_lock*), builds the verifier prompt,
-    runs the verifier, and calls the supervisor again.  Supervisor calls
-    are serialized so that shared state on disk is never corrupted.
-
-    Returns ``(decisions, errors)`` where *decisions* maps task-id to the
-    final supervisor decision dict (from the verifier phase) and *errors*
-    maps task-id to an error message string.
+    Returns ``(results, errors)`` where *results* maps task-id to the
+    ``run_role_turn`` return dict and *errors* maps task-id to an error
+    message string.
     """
-    decisions: dict[str, dict] = {}
+    results: dict[str, dict] = {}
     errors: dict[str, str] = {}
 
-    def _run_pipeline(task: dict) -> None:
+    def _run_one(task: dict) -> None:
         task_id = str(task["id"])
-        attempt = int(task.get("attempts", 0)) + 1
         try:
-            # --- 1. Build implementer prompt (no shared state needed) ---
-            impl_prompt = build_implementer_prompt_for_task(paths, task)
-
-            # --- 2. Run implementer turn (concurrent, no lock) ---
-            impl_turn = run_role_turn(
+            prompt = build_implementer_prompt_for_task(paths, task)
+            turn = run_role_turn(
                 manager=manager,
                 role="implementer",
                 task_id=task_id,
-                prompt=impl_prompt,
+                prompt=prompt,
                 repo=paths.repo,
                 sandbox=sandbox_for_role("implementer", execution_policy),
             )
-            impl_report = impl_turn["report"]
-
-            # --- 3-5. Supervisor call for implementer + build verifier prompt (under lock) ---
-            with supervisor_lock:
-                task_thread_map[task_id] = impl_turn["thread_id"]
-
-                # Set state so evaluate_supervisor_status reads the right context
-                state_payload = read_json(paths.state)
-                state_payload["state"]["current_role"] = "implementer"
-                state_payload["state"]["current_task_id"] = task_id
-                state_payload["state"]["current_attempt"] = attempt
-                write_json_atomic(paths.state, state_payload)
-
-                impl_decision = evaluate_supervisor_status(
-                    repo=paths.repo, report_override=impl_report,
-                )
-                # impl_decision should be dispatch_verifier; if not, record and bail
-                if impl_decision["decision"] in ("stop", "needs_human"):
-                    decisions[task_id] = impl_decision
-                    return
-
-                # State now has trial_commit set by implementer_report_state.
-                # Build verifier prompt while state is still correct for this task.
-                verifier_prompt = build_verifier_prompt(paths)
-
-            # --- 6. Run verifier turn (concurrent, no lock) ---
-            verifier_turn = run_role_turn(
-                manager=manager,
-                role="verifier",
-                task_id=task_id,
-                prompt=verifier_prompt,
-                repo=paths.repo,
-                sandbox=sandbox_for_role("verifier", execution_policy),
-            )
-            verifier_report = verifier_turn["report"]
-
-            # --- 7. Supervisor call for verifier (under lock) ---
-            with supervisor_lock:
-                state_payload = read_json(paths.state)
-                state_payload["state"]["current_role"] = "verifier"
-                state_payload["state"]["current_task_id"] = task_id
-                state_payload["state"]["current_attempt"] = attempt
-                # trial_commit was already persisted in step 4
-                write_json_atomic(paths.state, state_payload)
-
-                verifier_decision = evaluate_supervisor_status(
-                    repo=paths.repo, report_override=verifier_report,
-                )
-                decisions[task_id] = verifier_decision
-
+            results[task_id] = turn
         except Exception as exc:
             errors[task_id] = str(exc)
 
-    max_workers = min(len(ready_tasks), 8) if ready_tasks else 1
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_run_pipeline, task) for task in ready_tasks]
-        for fut in futures:
-            fut.result()  # propagate unexpected exceptions not caught inside _run_pipeline
+    threads = []
+    for task in ready_tasks:
+        t = threading.Thread(target=_run_one, args=(task,))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
 
-    return decisions, errors
+    return results, errors
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +305,6 @@ def run_runtime(args: argparse.Namespace) -> int:
 
     task_thread_map: dict[str, str] = {}  # task_id -> last thread_id
     last_verifier_feedback: str = ""  # verifier summary from the most recent revert
-    supervisor_lock = threading.Lock()
 
     while True:
         gate = evaluate_launch_context(repo=paths.repo, ignore_running_runtime=True)
@@ -447,16 +387,14 @@ def run_runtime(args: argparse.Namespace) -> int:
             tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
             ready = all_ready_tasks(tasks_payload)
             if len(ready) > 1:
-                # Run full implement→verify pipelines in parallel
+                # Run parallel implementers, then process results sequentially
                 try:
-                    par_decisions, par_errors = _run_parallel_task_pipelines(
+                    results, errors = _run_parallel_implementers(
                         manager=manager,
                         ready_tasks=ready,
                         paths=paths,
                         runtime=runtime,
                         execution_policy=execution_policy,
-                        task_thread_map=task_thread_map,
-                        supervisor_lock=supervisor_lock,
                     )
                 except (HarnessError, AppServerError, OSError) as exc:
                     runtime["status"] = "needs_human"
@@ -465,33 +403,59 @@ def run_runtime(args: argparse.Namespace) -> int:
                     manager.shutdown()
                     return 2
 
-                # Check for errors and terminal decisions
+                # Process results sequentially — state transitions must be serial
+                tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
+                idx = task_index(tasks_payload)
                 for task in ready:
-                    tid = str(task["id"])
-                    if tid in par_errors:
+                    task_id = str(task["id"])
+                    if task_id in errors:
                         runtime["status"] = "needs_human"
-                        runtime["terminal_reason"] = par_errors[tid]
+                        runtime["terminal_reason"] = errors[task_id]
                         persist_runtime(paths.runtime, runtime)
                         manager.shutdown()
                         return 2
-                    if tid in par_decisions:
-                        d = par_decisions[tid]
-                        runtime["last_decision"] = d["decision"]
-                        runtime["last_reason"] = d["reason"]
-                        persist_runtime(paths.runtime, runtime)
+                    if task_id not in results:
+                        continue
 
-                        if d["decision"] == "stop":
-                            runtime["status"] = "terminal"
-                            runtime["terminal_reason"] = d["reason"]
-                            persist_runtime(paths.runtime, runtime)
-                            manager.shutdown()
-                            return 0
-                        if d["decision"] == "needs_human":
-                            runtime["status"] = "needs_human"
-                            runtime["terminal_reason"] = d["reason"]
-                            persist_runtime(paths.runtime, runtime)
-                            manager.shutdown()
-                            return 2
+                    task_thread_map[task_id] = results[task_id]["thread_id"]
+
+                    # Set the correct task context so evaluate_supervisor_status
+                    # reads the right current_task_id / current_attempt / role.
+                    par_task = idx[task_id]
+                    state_payload = read_json(paths.state)
+                    state_payload["state"]["current_role"] = "implementer"
+                    state_payload["state"]["current_task_id"] = task_id
+                    state_payload["state"]["current_attempt"] = int(par_task.get("attempts", 0)) + 1
+                    write_json_atomic(paths.state, state_payload)
+
+                    par_report = results[task_id]["report"]
+                    try:
+                        par_decision = evaluate_supervisor_status(
+                            repo=paths.repo, report_override=par_report
+                        )
+                    except (HarnessError, AppServerError) as exc:
+                        runtime["status"] = "needs_human"
+                        runtime["terminal_reason"] = str(exc)
+                        persist_runtime(paths.runtime, runtime)
+                        manager.shutdown()
+                        return 2
+
+                    runtime["last_decision"] = par_decision["decision"]
+                    runtime["last_reason"] = par_decision["reason"]
+                    persist_runtime(paths.runtime, runtime)
+
+                    if par_decision["decision"] == "stop":
+                        runtime["status"] = "terminal"
+                        runtime["terminal_reason"] = par_decision["reason"]
+                        persist_runtime(paths.runtime, runtime)
+                        manager.shutdown()
+                        return 0
+                    if par_decision["decision"] == "needs_human":
+                        runtime["status"] = "needs_human"
+                        runtime["terminal_reason"] = par_decision["reason"]
+                        persist_runtime(paths.runtime, runtime)
+                        manager.shutdown()
+                        return 2
 
                 time.sleep(args.sleep_seconds)
                 continue
