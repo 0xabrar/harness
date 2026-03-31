@@ -110,7 +110,7 @@ class RoleFlowTests(unittest.TestCase):
             prompt = build_planner_prompt(default_paths(tmp))
             self.assertIn("tasks.json", prompt)
             self.assertIn("plan.md", prompt)
-            self.assertIn("planner report", prompt.lower())
+            self.assertIn("planner role", prompt.lower())
 
 
 if __name__ == "__main__":

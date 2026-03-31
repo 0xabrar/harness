@@ -176,7 +176,7 @@ class TestBuildImplementerPromptForTask(unittest.TestCase):
     def test_prompt_has_role_implementer(self) -> None:
         task = _make_task("T-001")
         prompt = build_implementer_prompt_for_task(FAKE_PATHS, task)
-        self.assertIn("role = implementer", prompt)
+        self.assertIn("implementer role", prompt)
 
 
 # ---------------------------------------------------------------------------

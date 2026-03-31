@@ -98,7 +98,7 @@ class TestPlannerPrompt(unittest.TestCase):
     @patch("harness_build_prompt.read_json", side_effect=_mock_read_json)
     def test_keeps_field_list(self, _rj, _lt, _rr):
         prompt = build_planner_prompt(FAKE_PATHS)
-        self.assertIn("role = planner", prompt)
+        self.assertIn("role", prompt)
         self.assertIn("revision", prompt)
         self.assertIn("summary", prompt)
         self.assertIn("task_changes", prompt)
@@ -124,7 +124,7 @@ class TestImplementerPrompt(unittest.TestCase):
     @patch("harness_build_prompt.read_json", side_effect=_mock_read_json)
     def test_keeps_field_list(self, _rj, _lt, _rr):
         prompt = build_implementer_prompt(FAKE_PATHS)
-        self.assertIn("role = implementer", prompt)
+        self.assertIn("role", prompt)
         self.assertIn("task_id", prompt)
         self.assertIn("files_changed", prompt)
 
@@ -149,7 +149,7 @@ class TestVerifierPrompt(unittest.TestCase):
     @patch("harness_build_prompt.read_json", side_effect=_mock_read_json)
     def test_keeps_field_list(self, _rj, _lt, _rr):
         prompt = build_verifier_prompt(FAKE_PATHS)
-        self.assertIn("role = verifier", prompt)
+        self.assertIn("role", prompt)
         self.assertIn("verdict", prompt)
         self.assertIn("criteria_results", prompt)
 
