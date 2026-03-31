@@ -127,7 +127,7 @@ def run_role_turn(
     ``parse_error``.
     """
     key = task_id or role
-    ms = manager.acquire(key)
+    ms = manager.acquire(key, resume_thread_id=resume_thread_id)
     retried = False
     try:
         while True:
@@ -241,8 +241,6 @@ def start_runtime(args: argparse.Namespace, *, runner_path: Path) -> dict[str, A
         "--codex-bin",
         args.codex_bin,
     ]
-    for value in args.codex_arg:
-        command.extend(["--codex-arg", value])
     paths.runtime_log.parent.mkdir(parents=True, exist_ok=True)
     log_handle = paths.runtime_log.open("a", encoding="utf-8")
     process = subprocess.Popen(
