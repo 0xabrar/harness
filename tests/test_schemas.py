@@ -61,7 +61,7 @@ class TestValidateReport(unittest.TestCase):
             "verdict": "accept",
             "summary": "All criteria met.",
             "findings": [],
-            "criteria_results": [{"criterion": "tests pass", "passed": True}],
+            "criteria_results": [{"criterion": "tests pass", "result": "pass", "evidence": "exit 0"}],
             "proposed_tasks": [],
         }
         self.assertTrue(validate_report(report, "verifier"))

@@ -118,5 +118,11 @@ def _validate_object(obj: Any, schema: dict[str, Any]) -> bool:
         if prop_type == "object" and isinstance(value, dict):
             if not _validate_object(value, prop_schema):
                 return False
+        elif prop_type == "array" and isinstance(value, list):
+            item_schema = prop_schema.get("items")
+            if item_schema and item_schema.get("type") == "object":
+                for item in value:
+                    if isinstance(item, dict) and not _validate_object(item, item_schema):
+                        return False
 
     return True
