@@ -178,13 +178,21 @@ class JsonRpcConnection:
         except (ValueError, OSError):
             pass
         finally:
+            eof_err = AppServerError("app-server connection closed")
             # Reject all pending requests on EOF
             with self._lock:
                 for _id, (event, holder) in self._pending.items():
                     if not event.is_set():
-                        holder.append(AppServerError("app-server connection closed"))
+                        holder.append(eof_err)
                         event.set()
                 self._pending.clear()
+            # Wake all notification waiters so run_turn doesn't hang
+            with self._waiter_lock:
+                for _, _, w_event, w_holder in self._notification_waiters:
+                    if not w_event.is_set():
+                        w_holder.append({"method": "__eof__", "params": {"error": "app-server connection closed"}})
+                        w_event.set()
+                self._notification_waiters.clear()
 
     def _resolve_pending(self, msg_id: int, value: Any) -> None:
         with self._lock:
@@ -261,6 +269,13 @@ class JsonRpcConnection:
             self._notifications.clear()
         return buffered
 
+    def _match_notification(self, notif: dict, method: str | None, thread_id: str | None) -> bool:
+        if method is not None and notif.get("method") != method:
+            return False
+        if thread_id is not None and notif.get("params", {}).get("threadId") != thread_id:
+            return False
+        return True
+
     def wait_for_notification(
         self,
         method: str | None = None,
@@ -268,18 +283,14 @@ class JsonRpcConnection:
         thread_id: str | None = None,
     ) -> dict[str, Any]:
         """Block until a notification matching *method* and/or *thread_id* arrives."""
-        # Check buffer first
-        with self._notification_lock:
-            for idx, notif in enumerate(self._notifications):
-                if method is not None and notif.get("method") != method:
-                    continue
-                if thread_id is not None and notif.get("params", {}).get("threadId") != thread_id:
-                    continue
-                return self._notifications.pop(idx)
-
+        # Atomically check buffer AND install waiter to prevent race
         event = threading.Event()
         holder: list[Any] = []
         with self._waiter_lock:
+            with self._notification_lock:
+                for idx, notif in enumerate(self._notifications):
+                    if self._match_notification(notif, method, thread_id):
+                        return self._notifications.pop(idx)
             self._notification_waiters.append((method, thread_id, event, holder))
         if not event.wait(timeout=timeout):
             # Remove our waiter on timeout
@@ -350,7 +361,7 @@ class CodexAppServer:
             env=self._env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
         )
         self._conn = JsonRpcConnection(self._proc)
@@ -458,6 +469,11 @@ class CodexAppServer:
 
             # item/started and item/completed carry the actual content
             if method in ("item/started", "item/completed"):
+                # Skip items from other threads (subagents)
+                notif_thread = n_params.get("threadId")
+                if notif_thread and notif_thread != thread_id:
+                    continue
+
                 item = n_params.get("item", {})
                 item_type = item.get("type", "")
 
@@ -637,7 +653,15 @@ class ServerManager:
         pids = data.get("pids", [])
         for pid in pids:
             try:
-                os.kill(int(pid), signal.SIGTERM)
+                pid_int = int(pid)
+                # Verify the process is actually a codex app-server before killing
+                cmdline_path = f"/proc/{pid_int}/cmdline"
+                if os.path.exists(cmdline_path):
+                    with open(cmdline_path, "rb") as f:
+                        cmdline = f.read().decode("utf-8", errors="replace")
+                    if "codex" not in cmdline or "app-server" not in cmdline:
+                        continue  # PID reused by an unrelated process
+                os.kill(pid_int, signal.SIGTERM)
             except (ProcessLookupError, PermissionError, ValueError, OSError):
                 pass
         try:
