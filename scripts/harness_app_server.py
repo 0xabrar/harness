@@ -12,6 +12,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -670,13 +671,25 @@ class ServerManager:
         for pid in pids:
             try:
                 pid_int = int(pid)
-                # Verify the process is actually a codex app-server before killing
-                cmdline_path = f"/proc/{pid_int}/cmdline"
-                if os.path.exists(cmdline_path):
-                    with open(cmdline_path, "rb") as f:
-                        cmdline = f.read().decode("utf-8", errors="replace")
-                    if "codex" not in cmdline or "app-server" not in cmdline:
-                        continue  # PID reused by an unrelated process
+                # Validate process identity before killing
+                if sys.platform == "linux":
+                    cmdline_path = f"/proc/{pid_int}/cmdline"
+                    if os.path.exists(cmdline_path):
+                        with open(cmdline_path, "rb") as f:
+                            cmdline = f.read().decode("utf-8", errors="replace")
+                        if "codex" not in cmdline or "app-server" not in cmdline:
+                            continue
+                    else:
+                        continue  # process gone already
+                elif sys.platform == "darwin":
+                    import subprocess as _sp
+                    result = _sp.run(["ps", "-p", str(pid_int), "-o", "command="], capture_output=True, text=True)
+                    if result.returncode != 0:
+                        continue  # process gone
+                    if "codex" not in result.stdout or "app-server" not in result.stdout:
+                        continue
+                else:
+                    continue  # unknown platform, skip rather than kill blindly
                 os.kill(pid_int, signal.SIGTERM)
             except (ProcessLookupError, PermissionError, ValueError, OSError):
                 pass
