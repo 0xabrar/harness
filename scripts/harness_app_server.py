@@ -458,6 +458,9 @@ class CodexAppServer:
             method = notif.get("method", "")
             n_params = notif.get("params", {})
 
+            if method == "__eof__":
+                raise AppServerError("app-server died during turn")
+
             if method == "turn/completed":
                 # Only complete if this is our thread's turn
                 notif_thread = n_params.get("threadId")
