@@ -601,12 +601,25 @@ class ServerManager:
 
     # -- public API --------------------------------------------------------
 
-    def acquire(self, task_id: str) -> ManagedServer:
-        """Find an idle server or spawn a new one, assign *task_id*, and return it."""
+    def acquire(self, task_id: str, *, resume_thread_id: str | None = None) -> ManagedServer:
+        """Find an idle server or spawn a new one, assign *task_id*, and return it.
+
+        When *resume_thread_id* is provided, prefer an idle server whose
+        ``thread_history`` already contains that thread ID so the resume
+        request reaches the process that created the thread.
+        """
         with self._lock:
             self._reap_idle()
 
-            # Try to reuse an idle server
+            # If resuming, prefer the server that owns the thread
+            if resume_thread_id:
+                for ms in self._servers:
+                    if ms.idle and ms.alive and resume_thread_id in ms.thread_history.values():
+                        ms.assign(task_id)
+                        self._persist_pids()
+                        return ms
+
+            # Fall back to any idle server
             for ms in self._servers:
                 if ms.idle and ms.alive:
                     ms.assign(task_id)

@@ -209,7 +209,7 @@ class TestRunParallelImplementers(unittest.TestCase):
         manager = MagicMock()
         call_count = 0
 
-        def _acquire(key: str) -> MagicMock:
+        def _acquire(key: str, **kwargs: Any) -> MagicMock:
             nonlocal call_count
             call_count += 1
             ms = MagicMock()

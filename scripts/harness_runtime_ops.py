@@ -417,6 +417,8 @@ def run_runtime(args: argparse.Namespace) -> int:
                     if task_id not in results:
                         continue
 
+                    task_thread_map[task_id] = results[task_id]["thread_id"]
+
                     # Set the correct task context so evaluate_supervisor_status
                     # reads the right current_task_id / current_attempt / role.
                     par_task = idx[task_id]
