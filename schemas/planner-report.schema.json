@@ -12,7 +12,8 @@
         "added": {"type": "array", "items": {"type": "string"}},
         "updated": {"type": "array", "items": {"type": "string"}},
         "closed": {"type": "array", "items": {"type": "string"}}
-      }
+      },
+      "additionalProperties": false
     },
     "planner_requested_reason": {"type": "string"}
   },

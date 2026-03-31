@@ -365,18 +365,20 @@ class CodexAppServer:
         *,
         sandbox: str | None = None,
         model: str | None = None,
-        ephemeral: bool = False,
+        ephemeral: bool = True,
     ) -> str:
         """Send ``thread/start`` and return the thread id."""
-        params: dict[str, Any] = {}
-        if sandbox is not None:
-            params["sandbox"] = sandbox
+        params: dict[str, Any] = {
+            "cwd": self._cwd,
+            "approvalPolicy": "never",
+            "sandbox": sandbox or "read-only",
+            "ephemeral": ephemeral,
+        }
         if model is not None:
             params["model"] = model
-        if ephemeral:
-            params["ephemeral"] = True
         result = self._request("thread/start", params)
-        return str(result.get("threadId", ""))
+        thread = result.get("thread", {})
+        return str(thread.get("id", ""))
 
     def resume_thread(
         self,
@@ -386,13 +388,17 @@ class CodexAppServer:
         model: str | None = None,
     ) -> str:
         """Send ``thread/resume`` and return the thread id."""
-        params: dict[str, Any] = {"threadId": thread_id}
-        if sandbox is not None:
-            params["sandbox"] = sandbox
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "cwd": self._cwd,
+            "approvalPolicy": "never",
+            "sandbox": sandbox or "read-only",
+        }
         if model is not None:
             params["model"] = model
         result = self._request("thread/resume", params)
-        return str(result.get("threadId", thread_id))
+        thread = result.get("thread", {})
+        return str(thread.get("id", thread_id))
 
     def run_turn(
         self,
@@ -406,13 +412,10 @@ class CodexAppServer:
     ) -> dict[str, Any]:
         """Send ``turn/start``, wait for ``turn/completed``, and return a result dict.
 
-        The returned dict contains:
-        - ``status``: ``"completed"`` or ``"error"``
-        - ``thread_id``: the thread id
-        - ``final_message``: the last assistant message text
-        - ``file_changes``: list of file-change notifications
-        - ``command_executions``: list of command-execution notifications
-        - ``reasoning_summary``: concatenated reasoning summary text
+        Notifications from the app-server arrive as ``item/started`` and
+        ``item/completed`` with ``params.item`` containing the item payload.
+        The final assistant message is the last ``agentMessage`` item text.
+        ``turn/completed`` signals the end of the turn.
         """
         params: dict[str, Any] = {
             "threadId": thread_id,
@@ -427,49 +430,70 @@ class CodexAppServer:
 
         conn = self._connection()
 
-        # Send turn/start (fire-and-forget RPC — the result is just an ack)
+        # Send turn/start — the response is just an ack with turn metadata
         conn.request("turn/start", params, timeout=timeout)
 
         # Collect notifications until turn/completed
         file_changes: list[dict[str, Any]] = []
         command_executions: list[dict[str, Any]] = []
         reasoning_parts: list[str] = []
-        final_message: str = ""
+        last_agent_message: str = ""
         status: str = "completed"
 
+        error_message: str = ""
         while True:
-            notif = conn.wait_for_notification(timeout=timeout, thread_id=thread_id)
+            # Accept any notification (not filtered by method) for this thread
+            notif = conn.wait_for_notification(timeout=timeout)
             method = notif.get("method", "")
             n_params = notif.get("params", {})
 
             if method == "turn/completed":
+                # Only complete if this is our thread's turn
+                notif_thread = n_params.get("threadId")
+                if notif_thread and notif_thread != thread_id:
+                    continue  # subagent turn, not ours
                 turn = n_params.get("turn", {})
                 status = turn.get("status", "completed")
-                # Extract final message from the turn items
-                items = turn.get("items", [])
-                for item in reversed(items):
-                    if item.get("type") == "agentMessage":
-                        parts = item.get("content", [])
-                        texts = [p.get("text", "") for p in parts if p.get("type") == "text"]
-                        if texts:
-                            final_message = "\n".join(texts)
-                            break
                 break
 
-            if method == "item/fileChange":
-                file_changes.append(n_params)
-            elif method == "item/commandExecution":
-                command_executions.append(n_params)
-            elif method == "item/reasoning/summaryText":
-                reasoning_parts.append(str(n_params.get("text", "")))
+            # item/started and item/completed carry the actual content
+            if method in ("item/started", "item/completed"):
+                item = n_params.get("item", {})
+                item_type = item.get("type", "")
+
+                if item_type == "agentMessage" and item.get("text"):
+                    last_agent_message = item["text"]
+
+                if item_type == "fileChange" and method == "item/completed":
+                    file_changes.append(item)
+
+                if item_type == "commandExecution" and method == "item/completed":
+                    command_executions.append(item)
+
+                if item_type == "reasoning" and method == "item/completed":
+                    summary = item.get("summary")
+                    if isinstance(summary, str) and summary.strip():
+                        reasoning_parts.append(summary.strip())
+                    elif isinstance(summary, list):
+                        for part in summary:
+                            text = part.get("text", "") if isinstance(part, dict) else str(part)
+                            if text.strip():
+                                reasoning_parts.append(text.strip())
+
+            if method == "error":
+                err = n_params.get("error", {})
+                error_message = err.get("message", "") if isinstance(err, dict) else str(err)
+
+            # turn/started, thread/started, etc. — just continue collecting
 
         return {
             "status": status,
             "thread_id": thread_id,
-            "final_message": final_message,
+            "final_message": last_agent_message,
             "file_changes": file_changes,
             "command_executions": command_executions,
             "reasoning_summary": "\n".join(reasoning_parts),
+            "error": error_message,
         }
 
     @property
