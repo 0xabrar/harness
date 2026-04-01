@@ -16,19 +16,25 @@ from harness_artifacts import (
     DEFAULT_EXECUTION_POLICY,
     HarnessError,
     Paths,
+    append_event,
     all_ready_tasks,
+    all_tasks_done,
     build_launch_manifest,
     build_runtime_payload,
     default_paths,
     load_tasks,
     read_json,
     refresh_ready_tasks,
+    report_path_for_role,
     task_index,
+    utc_now,
     write_json_atomic,
+    write_tasks,
 )
 from harness_init_run import initialize_run
 from harness_build_prompt import build_implementer_prompt, build_implementer_prompt_for_task, build_planner_prompt, build_verifier_prompt
 from harness_launch_gate import evaluate_launch_context
+from harness_lessons import append_lesson
 from harness_report_parser import parse_structured_output
 from harness_runtime_common import ensure_runtime_not_running, persist_runtime
 from harness_schemas import load_schema
@@ -70,6 +76,7 @@ def _run_parallel_implementers(
     paths: Paths,
     runtime: dict,
     execution_policy: str = "danger_full_access",
+    task_states: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict], dict[str, str]]:
     """Run implementers for multiple independent tasks concurrently.
 
@@ -83,7 +90,17 @@ def _run_parallel_implementers(
     def _run_one(task: dict) -> None:
         task_id = str(task["id"])
         try:
-            prompt = build_implementer_prompt_for_task(paths, task)
+            record = (task_states or {}).get(task_id, {})
+            attempt = int(record.get("attempt") or (int(task.get("attempts", 0)) + 1))
+            prompt = build_implementer_prompt_for_task(paths, task, attempt=attempt)
+            feedback = str(record.get("verifier_feedback") or "")
+            if feedback:
+                prompt = (
+                    "[VERIFIER FEEDBACK FROM PREVIOUS ATTEMPT]\n"
+                    f"{feedback}\n"
+                    "[END VERIFIER FEEDBACK]\n\n"
+                    f"{prompt}"
+                )
             turn = run_role_turn(
                 manager=manager,
                 role="implementer",
@@ -91,6 +108,7 @@ def _run_parallel_implementers(
                 prompt=prompt,
                 repo=paths.repo,
                 sandbox=sandbox_for_role("implementer", execution_policy),
+                resume_thread_id=str(record.get("thread_id") or "") or None,
             )
             results[task_id] = turn
         except Exception as exc:
@@ -296,6 +314,295 @@ def prompt_for_role(paths: Paths, role: str) -> str:
     raise HarnessError(f"Unsupported role: {role!r}")
 
 
+def normalize_state_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
+    """Backfill newer runtime fields onto older state payloads."""
+    state = state_payload.setdefault("state", {})
+    if not isinstance(state.get("active_tasks"), dict):
+        state["active_tasks"] = {}
+    state.setdefault("planner_pending_reason", "")
+    return state_payload
+
+
+def _write_state_payload(paths: Paths, state_payload: dict[str, Any]) -> None:
+    state_payload["updated_at"] = utc_now()
+    write_json_atomic(paths.state, state_payload)
+
+
+def _active_tasks(state_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    state = normalize_state_payload(state_payload)["state"]
+    return state["active_tasks"]
+
+
+def _set_legacy_slot(
+    state_payload: dict[str, Any],
+    *,
+    role: str,
+    task_id: str = "",
+    attempt: int = 0,
+    trial_commit: str = "",
+) -> None:
+    state = normalize_state_payload(state_payload)["state"]
+    state["current_role"] = role
+    state["current_task_id"] = task_id
+    state["current_attempt"] = attempt
+    state["trial_commit"] = trial_commit
+
+
+def _clear_legacy_slot(state_payload: dict[str, Any]) -> None:
+    _set_legacy_slot(state_payload, role="", task_id="", attempt=0, trial_commit="")
+
+
+def _context_string(state_payload: dict[str, Any]) -> str:
+    config = state_payload.get("config", {})
+    state = state_payload.get("state", {})
+    return (
+        f"goal={config.get('goal', '')}; "
+        f"scope={config.get('scope', '')}; "
+        f"role={state.get('current_role', '')}"
+    )
+
+
+def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
+    return (int(task.get("priority", 100)), str(task["id"]))
+
+
+def _sorted_active_task_ids(tasks_payload: dict[str, Any], state_payload: dict[str, Any], *, role: str) -> list[str]:
+    active = _active_tasks(state_payload)
+    index = task_index(tasks_payload)
+    ids = [task_id for task_id, record in active.items() if str(record.get("role") or "") == role]
+    ids.sort(key=lambda task_id: _task_sort_key(index.get(task_id, {"id": task_id, "priority": 100})))
+    return ids
+
+
+def _ready_tasks_not_active(tasks_payload: dict[str, Any], state_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    active = _active_tasks(state_payload)
+    return [task for task in all_ready_tasks(tasks_payload) if str(task["id"]) not in active]
+
+
+def _record_event(
+    paths: Paths,
+    state_payload: dict[str, Any],
+    *,
+    role: str,
+    task_id: str,
+    attempt: int,
+    commit: str,
+    status: str,
+    decision: str,
+    description: str,
+) -> None:
+    state = normalize_state_payload(state_payload)["state"]
+    seq = int(state.get("seq", 0)) + 1
+    state["seq"] = seq
+    append_event(
+        path=paths.events,
+        seq=seq,
+        role=role,
+        task_id=task_id or "-",
+        attempt=attempt,
+        commit=commit or "-",
+        status=status,
+        decision=decision,
+        description=description,
+    )
+
+
+def _revert_trial_commit(repo: Path, trial_commit: str) -> None:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "revert", "--no-edit", trial_commit],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise HarnessError(completed.stderr.strip() or f"Failed to revert commit {trial_commit}")
+
+
+def _apply_implementer_result(
+    *,
+    paths: Paths,
+    state_payload: dict[str, Any],
+    tasks_payload: dict[str, Any],
+    task: dict[str, Any],
+    turn: dict[str, Any],
+) -> dict[str, str]:
+    state = normalize_state_payload(state_payload)["state"]
+    active = _active_tasks(state_payload)
+    task_id = str(task["id"])
+    report = turn["report"]
+    attempt = int(report.get("attempt") or active.get(task_id, {}).get("attempt") or (int(task.get("attempts", 0)) + 1))
+    commit = str(report.get("commit") or report.get("trial_commit") or "")
+    if not commit:
+        raise HarnessError(f"Implementer report for {task_id} must include a commit.")
+
+    report_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
+    write_json_atomic(report_path, report)
+
+    index = task_index(tasks_payload)
+    current_task = index[task_id]
+    current_task["status"] = "in_progress"
+    current_task["attempts"] = attempt
+    current_task["last_attempt_commit"] = commit
+
+    active[task_id] = {
+        "role": "verifier",
+        "attempt": attempt,
+        "trial_commit": commit,
+        "thread_id": str(turn.get("thread_id") or active.get(task_id, {}).get("thread_id") or ""),
+        "verifier_feedback": "",
+    }
+
+    state["implementer_runs"] += 1
+    state["last_status"] = "submit_trial"
+    state["last_decision"] = "dispatch_verifier"
+    _set_legacy_slot(state_payload, role="verifier", task_id=task_id, attempt=attempt, trial_commit=commit)
+
+    write_tasks(paths.tasks, tasks_payload)
+    _record_event(
+        paths,
+        state_payload,
+        role="implementer",
+        task_id=task_id,
+        attempt=attempt,
+        commit=commit,
+        status="submit_trial",
+        decision="dispatch_verifier",
+        description=str(report.get("summary") or "Implementer submitted trial commit."),
+    )
+    _write_state_payload(paths, state_payload)
+    return {"decision": "relaunch", "reason": "dispatch_verifier"}
+
+
+def _apply_verifier_result(
+    *,
+    paths: Paths,
+    state_payload: dict[str, Any],
+    tasks_payload: dict[str, Any],
+    task_id: str,
+    report: dict[str, Any],
+) -> dict[str, str]:
+    state = normalize_state_payload(state_payload)["state"]
+    active = _active_tasks(state_payload)
+    record = active.get(task_id)
+    if record is None:
+        raise HarnessError(f"Active verifier state missing for task {task_id}.")
+
+    attempt = int(record.get("attempt") or report.get("attempt") or 0)
+    commit = str(report.get("commit") or report.get("evaluated_commit") or report.get("trial_commit") or record.get("trial_commit") or "")
+    if not commit:
+        raise HarnessError(f"Verifier report for {task_id} must identify the evaluated commit.")
+
+    verdict = str(report.get("verdict") or "")
+    if verdict not in {"accept", "revert", "needs_human"}:
+        raise HarnessError("Verifier verdict must be accept, revert, or needs_human.")
+
+    verdict_path = report_path_for_role(paths, "verifier", task_id=task_id, attempt=attempt)
+    write_json_atomic(verdict_path, report)
+
+    index = task_index(tasks_payload)
+    task = index[task_id]
+    summary = str(report.get("summary") or f"Verifier returned {verdict}.")
+    proposed_tasks = list(report.get("proposed_tasks") or [])
+    state["verifier_runs"] += 1
+    state["last_verdict"] = verdict
+    state["last_status"] = verdict
+
+    if verdict == "accept":
+        task["status"] = "done"
+        task["last_verdict"] = "accept"
+        state["accepts"] += 1
+        state["accepted_commit"] = commit
+        state["trial_commit"] = ""
+        active.pop(task_id, None)
+        append_lesson(
+            path=paths.lessons,
+            title=f"Accepted task {task_id}",
+            category="task",
+            strategy=summary,
+            outcome="accept",
+            insight=summary,
+            context=_context_string(state_payload),
+            iteration=str(int(state.get("seq", 0)) + 1),
+        )
+        if proposed_tasks:
+            state["planner_pending_reason"] = "planner_update_requested"
+
+        tasks_payload = refresh_ready_tasks(tasks_payload)
+        if all_tasks_done(tasks_payload):
+            state["completed"] = True
+            _clear_legacy_slot(state_payload)
+            decision = {"decision": "stop", "reason": "all_tasks_done"}
+        elif not _active_tasks(state_payload) and not _ready_tasks_not_active(tasks_payload, state_payload):
+            state["planner_pending_reason"] = state.get("planner_pending_reason") or "planner_replan_needed"
+            _clear_legacy_slot(state_payload)
+            decision = {"decision": "relaunch", "reason": state["planner_pending_reason"]}
+        else:
+            _clear_legacy_slot(state_payload)
+            decision = {"decision": "relaunch", "reason": "continue_after_accept"}
+
+    elif verdict == "needs_human":
+        task["status"] = "blocked"
+        task["blocked_reason"] = summary
+        state["needs_human"] += 1
+        state["blocked"] += 1
+        active.pop(task_id, None)
+        _clear_legacy_slot(state_payload)
+        decision = {"decision": "needs_human", "reason": "verifier_escalated"}
+
+    else:
+        _revert_trial_commit(paths.repo, commit)
+        state["reverts"] += 1
+        state["trial_commit"] = ""
+        task["last_verdict"] = "revert"
+        append_lesson(
+            path=paths.lessons,
+            title=f"Reverted task {task_id} attempt {attempt}",
+            category="task",
+            strategy=summary,
+            outcome="revert",
+            insight=summary,
+            context=_context_string(state_payload),
+            iteration=str(int(state.get("seq", 0)) + 1),
+        )
+
+        max_attempts = int(state_payload["config"].get("max_task_attempts", 3))
+        if int(task.get("attempts", 0)) >= max_attempts:
+            task["status"] = "failed"
+            task["blocked_reason"] = summary
+            active.pop(task_id, None)
+            state["replans"] += 1
+            state["planner_pending_reason"] = "planner_replan_after_revert"
+            _clear_legacy_slot(state_payload)
+            decision = {"decision": "relaunch", "reason": "planner_replan_after_revert"}
+        else:
+            task["status"] = "ready"
+            active[task_id] = {
+                "role": "implementer",
+                "attempt": attempt + 1,
+                "trial_commit": "",
+                "thread_id": str(record.get("thread_id") or ""),
+                "verifier_feedback": summary,
+            }
+            _set_legacy_slot(state_payload, role="implementer", task_id=task_id, attempt=attempt + 1, trial_commit="")
+            decision = {"decision": "relaunch", "reason": "retry_task"}
+
+    state["last_decision"] = decision["reason"]
+    write_tasks(paths.tasks, tasks_payload)
+    _record_event(
+        paths,
+        state_payload,
+        role="verifier",
+        task_id=task_id,
+        attempt=attempt,
+        commit=commit,
+        status=verdict,
+        decision=decision["reason"],
+        description=summary,
+    )
+    _write_state_payload(paths, state_payload)
+    return decision
+
+
 def run_runtime(args: argparse.Namespace) -> int:
     paths = default_paths(args.repo)
     runtime = read_json(paths.runtime) if paths.runtime.exists() else build_runtime_payload(paths=paths, status="running")
@@ -307,8 +614,6 @@ def run_runtime(args: argparse.Namespace) -> int:
     manager = ServerManager(cwd=str(paths.repo), codex_bin=codex_bin)
     manager.kill_orphans()
 
-    task_thread_map: dict[str, str] = {}  # task_id -> last thread_id
-    last_verifier_feedback: str = ""  # verifier summary from the most recent revert
     supervisor_lock = threading.Lock()
 
     while True:
@@ -332,47 +637,254 @@ def run_runtime(args: argparse.Namespace) -> int:
                 force=False,
             )
 
-        state = read_json(paths.state)
-        role = str(state["state"].get("current_role") or "")
-        task_id = str(state["state"].get("current_task_id") or "")
-        prompt_text = prompt_for_role(paths, role)
+        state_payload = normalize_state_payload(read_json(paths.state))
+        tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
+        active = _active_tasks(state_payload)
 
-        # On implementer retry, prepend verifier feedback so the agent
-        # knows *why* the previous attempt was reverted.
-        resume_id: str | None = None
-        if role == "implementer" and task_id in task_thread_map:
-            resume_id = task_thread_map[task_id]
-            if last_verifier_feedback:
-                prompt_text = (
-                    f"[VERIFIER FEEDBACK FROM PREVIOUS ATTEMPT]\n"
-                    f"{last_verifier_feedback}\n"
-                    f"[END VERIFIER FEEDBACK]\n\n"
-                    f"{prompt_text}"
+        if all_tasks_done(tasks_payload):
+            runtime["status"] = "terminal"
+            runtime["terminal_reason"] = "all_tasks_done"
+            persist_runtime(paths.runtime, runtime)
+            manager.shutdown()
+            return 0
+
+        verifier_ids = _sorted_active_task_ids(tasks_payload, state_payload, role="verifier")
+        if verifier_ids:
+            task_id = verifier_ids[0]
+            record = active[task_id]
+            attempt = int(record.get("attempt") or 0)
+            trial_commit = str(record.get("trial_commit") or "")
+            _set_legacy_slot(state_payload, role="verifier", task_id=task_id, attempt=attempt, trial_commit=trial_commit)
+            _write_state_payload(paths, state_payload)
+
+            runtime["last_role"] = "verifier"
+            runtime["last_task_id"] = task_id
+            persist_runtime(paths.runtime, runtime)
+
+            try:
+                turn = run_role_turn(
+                    manager=manager,
+                    role="verifier",
+                    task_id=task_id,
+                    prompt=build_verifier_prompt(paths),
+                    repo=paths.repo,
+                    sandbox=sandbox_for_role("verifier", execution_policy),
                 )
-                last_verifier_feedback = ""
+                with supervisor_lock:
+                    decision = _apply_verifier_result(
+                        paths=paths,
+                        state_payload=state_payload,
+                        tasks_payload=tasks_payload,
+                        task_id=task_id,
+                        report=turn["report"],
+                    )
+            except (HarnessError, AppServerError, OSError) as exc:
+                runtime["status"] = "needs_human"
+                runtime["terminal_reason"] = str(exc)
+                persist_runtime(paths.runtime, runtime)
+                manager.shutdown()
+                return 2
 
-        runtime["last_role"] = role
-        runtime["last_task_id"] = task_id
+            runtime["last_decision"] = decision["decision"]
+            runtime["last_reason"] = decision["reason"]
+            persist_runtime(paths.runtime, runtime)
+
+            if decision["decision"] == "stop":
+                runtime["status"] = "terminal"
+                runtime["terminal_reason"] = decision["reason"]
+                persist_runtime(paths.runtime, runtime)
+                manager.shutdown()
+                return 0
+            if decision["decision"] == "needs_human":
+                runtime["status"] = "needs_human"
+                runtime["terminal_reason"] = decision["reason"]
+                persist_runtime(paths.runtime, runtime)
+                manager.shutdown()
+                return 2
+            time.sleep(args.sleep_seconds)
+            continue
+
+        planner_pending_reason = str(state_payload["state"].get("planner_pending_reason") or "")
+        if planner_pending_reason and not active:
+            state_payload["state"]["planner_pending_reason"] = ""
+            _set_legacy_slot(state_payload, role="planner", task_id="", attempt=0, trial_commit="")
+            _write_state_payload(paths, state_payload)
+
+            runtime["last_role"] = "planner"
+            runtime["last_task_id"] = ""
+            persist_runtime(paths.runtime, runtime)
+
+            try:
+                turn = run_role_turn(
+                    manager=manager,
+                    role="planner",
+                    task_id="",
+                    prompt=build_planner_prompt(paths),
+                    repo=paths.repo,
+                    sandbox=sandbox_for_role("planner", execution_policy),
+                )
+                with supervisor_lock:
+                    decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
+            except (HarnessError, AppServerError, OSError) as exc:
+                runtime["status"] = "needs_human"
+                runtime["terminal_reason"] = str(exc)
+                persist_runtime(paths.runtime, runtime)
+                manager.shutdown()
+                return 2
+
+            runtime["last_decision"] = decision["decision"]
+            runtime["last_reason"] = decision["reason"]
+            persist_runtime(paths.runtime, runtime)
+
+            if decision["decision"] == "stop":
+                runtime["status"] = "terminal"
+                runtime["terminal_reason"] = decision["reason"]
+                persist_runtime(paths.runtime, runtime)
+                manager.shutdown()
+                return 0
+            if decision["decision"] == "needs_human":
+                runtime["status"] = "needs_human"
+                runtime["terminal_reason"] = decision["reason"]
+                persist_runtime(paths.runtime, runtime)
+                manager.shutdown()
+                return 2
+            time.sleep(args.sleep_seconds)
+            continue
+
+        tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
+        state_payload = normalize_state_payload(read_json(paths.state))
+        active = _active_tasks(state_payload)
+        ready_tasks = _ready_tasks_not_active(tasks_payload, state_payload)
+
+        if ready_tasks:
+            for task in ready_tasks:
+                active[str(task["id"])] = {
+                    "role": "implementer",
+                    "attempt": int(task.get("attempts", 0)) + 1,
+                    "trial_commit": "",
+                    "thread_id": "",
+                    "verifier_feedback": "",
+                }
+            _write_state_payload(paths, state_payload)
+
+        implementer_ids = _sorted_active_task_ids(tasks_payload, state_payload, role="implementer")
+        if implementer_ids:
+            batch_tasks = [task_index(tasks_payload)[task_id] for task_id in implementer_ids]
+
+            runtime["last_role"] = "implementer"
+            runtime["last_task_id"] = ",".join(implementer_ids)
+            persist_runtime(paths.runtime, runtime)
+
+            try:
+                if len(batch_tasks) > 1:
+                    results, errors = _run_parallel_implementers(
+                        manager=manager,
+                        ready_tasks=batch_tasks,
+                        paths=paths,
+                        runtime=runtime,
+                        execution_policy=execution_policy,
+                        task_states=_active_tasks(state_payload),
+                    )
+                    for task in batch_tasks:
+                        task_id = str(task["id"])
+                        if task_id in errors:
+                            runtime["status"] = "needs_human"
+                            runtime["terminal_reason"] = errors[task_id]
+                            persist_runtime(paths.runtime, runtime)
+                            manager.shutdown()
+                            return 2
+                        if task_id not in results:
+                            continue
+                        state_payload = normalize_state_payload(read_json(paths.state))
+                        tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
+                        with supervisor_lock:
+                            decision = _apply_implementer_result(
+                                paths=paths,
+                                state_payload=state_payload,
+                                tasks_payload=tasks_payload,
+                                task=task_index(tasks_payload)[task_id],
+                                turn=results[task_id],
+                            )
+                    runtime["last_decision"] = decision["decision"]
+                    runtime["last_reason"] = decision["reason"]
+                    persist_runtime(paths.runtime, runtime)
+                else:
+                    task = batch_tasks[0]
+                    task_id = str(task["id"])
+                    record = _active_tasks(state_payload)[task_id]
+                    prompt = build_implementer_prompt_for_task(
+                        paths,
+                        task,
+                        attempt=int(record.get("attempt") or (int(task.get("attempts", 0)) + 1)),
+                    )
+                    feedback = str(record.get("verifier_feedback") or "")
+                    if feedback:
+                        prompt = (
+                            "[VERIFIER FEEDBACK FROM PREVIOUS ATTEMPT]\n"
+                            f"{feedback}\n"
+                            "[END VERIFIER FEEDBACK]\n\n"
+                            f"{prompt}"
+                        )
+                    turn = run_role_turn(
+                        manager=manager,
+                        role="implementer",
+                        task_id=task_id,
+                        prompt=prompt,
+                        repo=paths.repo,
+                        sandbox=sandbox_for_role("implementer", execution_policy),
+                        resume_thread_id=str(record.get("thread_id") or "") or None,
+                    )
+                    state_payload = normalize_state_payload(read_json(paths.state))
+                    tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
+                    with supervisor_lock:
+                        decision = _apply_implementer_result(
+                            paths=paths,
+                            state_payload=state_payload,
+                            tasks_payload=tasks_payload,
+                            task=task_index(tasks_payload)[task_id],
+                            turn=turn,
+                        )
+                    runtime["last_decision"] = decision["decision"]
+                    runtime["last_reason"] = decision["reason"]
+                    runtime["last_task_id"] = task_id
+                    persist_runtime(paths.runtime, runtime)
+            except (HarnessError, AppServerError, OSError) as exc:
+                runtime["status"] = "needs_human"
+                runtime["terminal_reason"] = str(exc)
+                persist_runtime(paths.runtime, runtime)
+                manager.shutdown()
+                return 2
+
+            time.sleep(args.sleep_seconds)
+            continue
+
+        tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
+        state_payload = normalize_state_payload(read_json(paths.state))
+        if all_tasks_done(tasks_payload):
+            runtime["status"] = "terminal"
+            runtime["terminal_reason"] = "all_tasks_done"
+            persist_runtime(paths.runtime, runtime)
+            manager.shutdown()
+            return 0
+
+        _set_legacy_slot(state_payload, role="planner", task_id="", attempt=0, trial_commit="")
+        _write_state_payload(paths, state_payload)
+
+        runtime["last_role"] = "planner"
+        runtime["last_task_id"] = ""
         persist_runtime(paths.runtime, runtime)
 
         try:
             turn = run_role_turn(
                 manager=manager,
-                role=role,
-                task_id=task_id,
-                prompt=prompt_text,
+                role="planner",
+                task_id="",
+                prompt=build_planner_prompt(paths),
                 repo=paths.repo,
-                sandbox=sandbox_for_role(role, execution_policy),
-                resume_thread_id=resume_id,
+                sandbox=sandbox_for_role("planner", execution_policy),
             )
-
-            # Track thread for potential future resume
-            if role == "implementer" and task_id:
-                task_thread_map[task_id] = turn["thread_id"]
-
-            report = turn["report"]
             with supervisor_lock:
-                decision = evaluate_supervisor_status(repo=paths.repo, report_override=report)
+                decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
         except (HarnessError, AppServerError, OSError) as exc:
             runtime["status"] = "needs_human"
             runtime["terminal_reason"] = str(exc)
@@ -380,111 +892,23 @@ def run_runtime(args: argparse.Namespace) -> int:
             manager.shutdown()
             return 2
 
-        # After a verifier revert that triggers a retry, capture the
-        # feedback so the next implementer turn can see it.
-        if decision.get("reason") == "retry_task":
-            last_verifier_feedback = str(report.get("summary") or "")
-
         runtime["last_decision"] = decision["decision"]
         runtime["last_reason"] = decision["reason"]
         persist_runtime(paths.runtime, runtime)
 
-        if decision["decision"] == "relaunch" and decision["reason"] == "dispatch_implementer":
-            tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
-            ready = all_ready_tasks(tasks_payload)
-            if len(ready) > 1:
-                # Run parallel implementers, then process results sequentially
-                try:
-                    results, errors = _run_parallel_implementers(
-                        manager=manager,
-                        ready_tasks=ready,
-                        paths=paths,
-                        runtime=runtime,
-                        execution_policy=execution_policy,
-                    )
-                except (HarnessError, AppServerError, OSError) as exc:
-                    runtime["status"] = "needs_human"
-                    runtime["terminal_reason"] = str(exc)
-                    persist_runtime(paths.runtime, runtime)
-                    manager.shutdown()
-                    return 2
-
-                # Process results sequentially — state transitions must be serial
-                tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
-                idx = task_index(tasks_payload)
-                for task in ready:
-                    task_id = str(task["id"])
-                    if task_id in errors:
-                        runtime["status"] = "needs_human"
-                        runtime["terminal_reason"] = errors[task_id]
-                        persist_runtime(paths.runtime, runtime)
-                        manager.shutdown()
-                        return 2
-                    if task_id not in results:
-                        continue
-
-                    task_thread_map[task_id] = results[task_id]["thread_id"]
-
-                    # Set the correct task context so evaluate_supervisor_status
-                    # reads the right current_task_id / current_attempt / role.
-                    par_task = idx[task_id]
-                    state_payload = read_json(paths.state)
-                    state_payload["state"]["current_role"] = "implementer"
-                    state_payload["state"]["current_task_id"] = task_id
-                    state_payload["state"]["current_attempt"] = int(par_task.get("attempts", 0)) + 1
-                    write_json_atomic(paths.state, state_payload)
-
-                    par_report = results[task_id]["report"]
-                    try:
-                        with supervisor_lock:
-                            par_decision = evaluate_supervisor_status(
-                                repo=paths.repo, report_override=par_report
-                            )
-                    except (HarnessError, AppServerError) as exc:
-                        runtime["status"] = "needs_human"
-                        runtime["terminal_reason"] = str(exc)
-                        persist_runtime(paths.runtime, runtime)
-                        manager.shutdown()
-                        return 2
-
-                    runtime["last_decision"] = par_decision["decision"]
-                    runtime["last_reason"] = par_decision["reason"]
-                    persist_runtime(paths.runtime, runtime)
-
-                    if par_decision["decision"] == "stop":
-                        runtime["status"] = "terminal"
-                        runtime["terminal_reason"] = par_decision["reason"]
-                        persist_runtime(paths.runtime, runtime)
-                        manager.shutdown()
-                        return 0
-                    if par_decision["decision"] == "needs_human":
-                        runtime["status"] = "needs_human"
-                        runtime["terminal_reason"] = par_decision["reason"]
-                        persist_runtime(paths.runtime, runtime)
-                        manager.shutdown()
-                        return 2
-
-                time.sleep(args.sleep_seconds)
-                continue
-            else:
-                # Single task — continue existing sequential flow
-                time.sleep(args.sleep_seconds)
-                continue
-
-        if decision["decision"] == "relaunch":
-            time.sleep(args.sleep_seconds)
-            continue
         if decision["decision"] == "stop":
             runtime["status"] = "terminal"
             runtime["terminal_reason"] = decision["reason"]
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 0
-        runtime["status"] = "needs_human"
-        runtime["terminal_reason"] = decision["reason"]
-        persist_runtime(paths.runtime, runtime)
-        manager.shutdown()
-        return 2
+        if decision["decision"] == "needs_human":
+            runtime["status"] = "needs_human"
+            runtime["terminal_reason"] = decision["reason"]
+            persist_runtime(paths.runtime, runtime)
+            manager.shutdown()
+            return 2
+        time.sleep(args.sleep_seconds)
 
 
 def stop_runtime(args: argparse.Namespace) -> dict[str, Any]:

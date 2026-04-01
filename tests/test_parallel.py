@@ -1,7 +1,9 @@
 """Unit tests for parallel implementer execution support."""
 from __future__ import annotations
 
+import json
 import threading
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -11,10 +13,19 @@ from unittest.mock import MagicMock, patch
 from harness_artifacts import (
     Paths,
     all_ready_tasks,
+    build_state_payload,
     refresh_ready_tasks,
+    task_index,
+    write_tasks,
 )
 from harness_build_prompt import build_implementer_prompt_for_task
-from harness_runtime_ops import _run_parallel_implementers, sandbox_for_role
+from harness_runtime_ops import (
+    _apply_implementer_result,
+    _apply_verifier_result,
+    _run_parallel_implementers,
+    normalize_state_payload,
+    sandbox_for_role,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +302,123 @@ class TestRunParallelImplementers(unittest.TestCase):
         )
         self.assertEqual(results, {})
         self.assertEqual(errors, {})
+
+
+class TestPerTaskExecutionState(unittest.TestCase):
+    def _make_paths(self, base: Path) -> Paths:
+        return Paths(
+            repo=base,
+            launch=base / "harness-launch.json",
+            runtime=base / "harness-runtime.json",
+            runtime_log=base / "harness-runtime.log",
+            state=base / "harness-state.json",
+            events=base / "harness-events.tsv",
+            lessons=base / "harness-lessons.md",
+            plan=base / "plan.md",
+            tasks=base / "tasks.json",
+            reports=base / "reports",
+        )
+
+    def _write_state(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def test_parallel_submissions_keep_both_tasks_tracked_until_each_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._make_paths(Path(tmp))
+            paths.reports.mkdir(parents=True, exist_ok=True)
+
+            state_payload = normalize_state_payload(
+                build_state_payload(config={"goal": "Build", "scope": ".", "max_task_attempts": 3})
+            )
+            state_payload["state"]["active_tasks"] = {
+                "T-001": {"role": "implementer", "attempt": 1, "trial_commit": "", "thread_id": "thread-1", "verifier_feedback": ""},
+                "T-002": {"role": "implementer", "attempt": 1, "trial_commit": "", "thread_id": "thread-2", "verifier_feedback": ""},
+            }
+            self._write_state(paths.state, state_payload)
+
+            tasks_payload = _make_payload([
+                _make_task("T-001", status="ready", priority=1),
+                _make_task("T-002", status="ready", priority=2),
+            ])
+            write_tasks(paths.tasks, tasks_payload)
+
+            _apply_implementer_result(
+                paths=paths,
+                state_payload=normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8"))),
+                tasks_payload=refresh_ready_tasks(json.loads(paths.tasks.read_text(encoding="utf-8"))),
+                task=task_index(tasks_payload)["T-001"],
+                turn={
+                    "thread_id": "thread-1",
+                    "report": {
+                        "role": "implementer",
+                        "task_id": "T-001",
+                        "attempt": 1,
+                        "commit": "abc1111",
+                        "summary": "Implemented T-001",
+                        "files_changed": ["a.py"],
+                        "checks_run": [],
+                        "proposed_tasks": [],
+                    },
+                },
+            )
+            _apply_implementer_result(
+                paths=paths,
+                state_payload=normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8"))),
+                tasks_payload=refresh_ready_tasks(json.loads(paths.tasks.read_text(encoding="utf-8"))),
+                task=task_index(tasks_payload)["T-002"],
+                turn={
+                    "thread_id": "thread-2",
+                    "report": {
+                        "role": "implementer",
+                        "task_id": "T-002",
+                        "attempt": 1,
+                        "commit": "def2222",
+                        "summary": "Implemented T-002",
+                        "files_changed": ["b.py"],
+                        "checks_run": [],
+                        "proposed_tasks": [],
+                    },
+                },
+            )
+
+            state_after_impl = normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8")))
+            self.assertEqual(
+                state_after_impl["state"]["active_tasks"]["T-001"]["role"],
+                "verifier",
+            )
+            self.assertEqual(
+                state_after_impl["state"]["active_tasks"]["T-002"]["role"],
+                "verifier",
+            )
+
+            _apply_verifier_result(
+                paths=paths,
+                state_payload=normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8"))),
+                tasks_payload=refresh_ready_tasks(json.loads(paths.tasks.read_text(encoding="utf-8"))),
+                task_id="T-002",
+                report={
+                    "role": "verifier",
+                    "task_id": "T-002",
+                    "attempt": 1,
+                    "commit": "def2222",
+                    "verdict": "accept",
+                    "summary": "Accepted T-002",
+                    "findings": [],
+                    "criteria_results": [],
+                    "proposed_tasks": [],
+                },
+            )
+
+            final_state = normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8")))
+            final_tasks = json.loads(paths.tasks.read_text(encoding="utf-8"))
+            final_index = {task["id"]: task for task in final_tasks["tasks"]}
+
+            self.assertIn("T-001", final_state["state"]["active_tasks"])
+            self.assertEqual(final_state["state"]["active_tasks"]["T-001"]["role"], "verifier")
+            self.assertNotIn("T-002", final_state["state"]["active_tasks"])
+            self.assertEqual(final_index["T-001"]["status"], "in_progress")
+            self.assertEqual(final_index["T-002"]["status"], "done")
 
 
 if __name__ == "__main__":

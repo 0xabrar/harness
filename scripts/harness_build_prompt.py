@@ -75,9 +75,15 @@ def build_implementer_prompt(paths: Paths) -> str:
     return _implementer_prompt_body(paths, task, attempt, criteria)
 
 
-def build_implementer_prompt_for_task(paths: Paths, task: dict) -> str:
-    """Build an implementer prompt for a specific task (used by parallel execution)."""
-    attempt = int(task.get("attempts", 0)) + 1
+def build_implementer_prompt_for_task(paths: Paths, task: dict, *, attempt: int | None = None) -> str:
+    """Build an implementer prompt for a specific task.
+
+    The runtime may supply an explicit *attempt* when re-dispatching a task
+    from per-task execution state (for example after a verifier-triggered
+    retry). When omitted, the prompt derives the next attempt from the task's
+    recorded attempt count.
+    """
+    attempt = attempt or (int(task.get("attempts", 0)) + 1)
     criteria = "\n".join(f"- {item}" for item in task.get("acceptance_criteria", []))
     return _implementer_prompt_body(paths, task, attempt, criteria)
 

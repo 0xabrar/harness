@@ -79,11 +79,11 @@ When a turn returns empty `final_message`, check the `error` field in the turn r
 - The report is always written to disk regardless (for auditability and so events/lessons can reference it).
 - When processing parallel implementer results, set `current_task_id` and `current_attempt` in `harness-state.json` before each `evaluate_supervisor_status` call.
 
-### State Machine Single-Slot Limitation
+### Per-Task Runtime State
 
-- `harness-state.json` has one `current_task_id` slot. It was designed for sequential execution.
-- Parallel results must be processed sequentially through the supervisor. Before each call, update the state file to point at the correct task.
-- This is a known limitation, not a bug. A proper multi-task state model would be a larger redesign.
+- `harness-state.json` now keeps task-local execution state under `state.active_tasks`.
+- Each active task tracks its own role (`implementer` or `verifier`), attempt number, trial commit, thread id, and retry feedback.
+- The legacy `current_task_id` / `current_role` slot still exists for prompt compatibility and status summaries, but it is no longer the source of truth for parallel execution.
 
 ## Testing
 

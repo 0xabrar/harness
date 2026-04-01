@@ -136,6 +136,8 @@ def build_state_payload(*, config: dict[str, Any], run_tag: str | None = None) -
             "current_role": "planner",
             "current_task_id": "",
             "current_attempt": 0,
+            "active_tasks": {},
+            "planner_pending_reason": "",
             "accepted_commit": "",
             "trial_commit": "",
             "last_status": "initialized",
