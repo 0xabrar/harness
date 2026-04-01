@@ -77,7 +77,7 @@ When a turn returns empty `final_message`, check the `error` field in the turn r
 - `evaluate_supervisor_status` accepts an optional `report_override` parameter.
 - When provided, it uses the report directly instead of reading from disk.
 - The report is always written to disk regardless (for auditability and so events/lessons can reference it).
-- When processing parallel implementer results, set `current_task_id` and `current_attempt` in `harness-state.json` before each `evaluate_supervisor_status` call.
+- Parallel implementer results should be translated into task-local runtime records under `state.active_tasks`; verifier work is then scheduled per task from that state.
 
 ### Per-Task Runtime State
 
