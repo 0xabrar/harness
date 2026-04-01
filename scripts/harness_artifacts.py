@@ -133,13 +133,9 @@ def build_state_payload(*, config: dict[str, Any], run_tag: str | None = None) -
         "state": {
             "seq": 0,
             "planner_revision": 0,
-            "current_role": "planner",
-            "current_task_id": "",
-            "current_attempt": 0,
             "active_tasks": {},
             "planner_pending_reason": "",
             "accepted_commit": "",
-            "trial_commit": "",
             "last_status": "initialized",
             "last_decision": "initialize",
             "last_verdict": "",
@@ -155,6 +151,17 @@ def build_state_payload(*, config: dict[str, Any], run_tag: str | None = None) -
         },
         "updated_at": utc_now(),
     }
+
+
+def normalize_state_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
+    """Ensure runtime state uses the active_tasks-only execution model."""
+    state = state_payload.setdefault("state", {})
+    if not isinstance(state.get("active_tasks"), dict):
+        state["active_tasks"] = {}
+    state.setdefault("planner_pending_reason", "")
+    for legacy_key in ("current_role", "current_task_id", "current_attempt", "trial_commit"):
+        state.pop(legacy_key, None)
+    return state_payload
 
 
 def initialize_artifacts(*, paths: Paths, config: dict[str, Any], run_tag: str | None = None, force: bool = False) -> None:

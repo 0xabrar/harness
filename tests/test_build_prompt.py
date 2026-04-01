@@ -34,10 +34,16 @@ FAKE_STATE = {
     "version": 1,
     "config": {"goal": "Build something", "scope": "repo"},
     "state": {
-        "current_role": "planner",
-        "current_task_id": "T-001",
-        "current_attempt": 1,
-        "trial_commit": "abc1234",
+        "active_tasks": {
+            "T-001": {
+                "role": "verifier",
+                "attempt": 1,
+                "trial_commit": "abc1234",
+                "thread_id": "thread-1",
+                "verifier_feedback": "",
+            }
+        },
+        "planner_pending_reason": "",
     },
 }
 

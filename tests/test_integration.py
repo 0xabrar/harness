@@ -98,9 +98,8 @@ class TestFullAcceptCycle(unittest.TestCase):
 
         # State should now point to implementer for task 1
         state = read_json(self.paths.state)
-        self.assertEqual(state["state"]["current_role"], "implementer")
-        self.assertEqual(state["state"]["current_task_id"], "1")
-        self.assertEqual(state["state"]["current_attempt"], 1)
+        self.assertEqual(state["state"]["active_tasks"]["1"]["role"], "implementer")
+        self.assertEqual(state["state"]["active_tasks"]["1"]["attempt"], 1)
 
         # --- Step 2: Implementer turn ---
         # Create a real git commit so the verifier flow has a valid commit
@@ -125,8 +124,8 @@ class TestFullAcceptCycle(unittest.TestCase):
 
         # State should now point to verifier
         state = read_json(self.paths.state)
-        self.assertEqual(state["state"]["current_role"], "verifier")
-        self.assertEqual(state["state"]["trial_commit"], commit)
+        self.assertEqual(state["state"]["active_tasks"]["1"]["role"], "verifier")
+        self.assertEqual(state["state"]["active_tasks"]["1"]["trial_commit"], commit)
 
         # --- Step 3: Verifier accepts ---
         verifier_report = {
@@ -149,9 +148,7 @@ class TestFullAcceptCycle(unittest.TestCase):
         self.assertTrue(state["state"]["completed"])
         self.assertEqual(state["state"]["accepts"], 1)
         self.assertEqual(state["state"]["reverts"], 0)
-        self.assertEqual(state["state"]["current_role"], "")
-        self.assertEqual(state["state"]["current_task_id"], "")
-        self.assertEqual(state["state"]["current_attempt"], 0)
+        self.assertEqual(state["state"]["active_tasks"], {})
         self.assertEqual(state["state"]["planner_runs"], 1)
         self.assertEqual(state["state"]["implementer_runs"], 1)
         self.assertEqual(state["state"]["verifier_runs"], 1)
@@ -244,11 +241,10 @@ class TestRevertFlow(unittest.TestCase):
 
         # State should be back on implementer for the same task, attempt 2
         state = read_json(self.paths.state)
-        self.assertEqual(state["state"]["current_role"], "implementer")
-        self.assertEqual(state["state"]["current_task_id"], "1")
-        self.assertEqual(state["state"]["current_attempt"], 2)
+        self.assertEqual(state["state"]["active_tasks"]["1"]["role"], "implementer")
+        self.assertEqual(state["state"]["active_tasks"]["1"]["attempt"], 2)
         self.assertEqual(state["state"]["reverts"], 1)
-        self.assertEqual(state["state"]["trial_commit"], "")
+        self.assertEqual(state["state"]["active_tasks"]["1"]["trial_commit"], "")
 
         # The trial commit should have been reverted — HEAD should differ
         current_head = git(self.repo, "rev-parse", "--short", "HEAD")
@@ -311,7 +307,8 @@ class TestRevertFlow(unittest.TestCase):
 
         # Final state: planner should be current role, task should be failed
         state = read_json(self.paths.state)
-        self.assertEqual(state["state"]["current_role"], "planner")
+        self.assertEqual(state["state"]["active_tasks"], {})
+        self.assertEqual(state["state"]["planner_pending_reason"], "planner_replan_after_revert")
         self.assertEqual(state["state"]["reverts"], 3)
 
         tasks = load_tasks(self.paths.tasks)

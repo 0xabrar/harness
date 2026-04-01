@@ -33,7 +33,8 @@ class HarnessInitTests(unittest.TestCase):
             state = read_json(Path(result["state_path"]))
             self.assertEqual(state["mode"], "harness")
             self.assertEqual(state["config"]["goal"], "Build a harness")
-            self.assertEqual(state["state"]["current_role"], "planner")
+            self.assertEqual(state["state"]["active_tasks"], {})
+            self.assertEqual(state["state"]["planner_pending_reason"], "")
             self.assertEqual(state["state"]["seq"], 1)
 
             events = Path(result["events_path"]).read_text(encoding="utf-8")

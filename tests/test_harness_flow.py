@@ -146,9 +146,7 @@ class HarnessFlowTests(unittest.TestCase):
             self.assertEqual(outcome["reason"], "all_tasks_done")
             state = read_json(repo / "harness-state.json")
             self.assertTrue(state["state"]["completed"])
-            self.assertEqual("", state["state"]["current_role"])
-            self.assertEqual("", state["state"]["current_task_id"])
-            self.assertEqual(0, state["state"]["current_attempt"])
+            self.assertEqual({}, state["state"]["active_tasks"])
             self.assertEqual("all_tasks_done", state["state"]["last_decision"])
 
             events = (repo / "harness-events.tsv").read_text(encoding="utf-8").splitlines()
@@ -284,7 +282,7 @@ class HarnessFlowTests(unittest.TestCase):
             self.assertEqual(outcome["decision"], "needs_human")
             state = read_json(repo / "harness-state.json")
             self.assertEqual(1, state["state"]["needs_human"])
-            self.assertEqual("", state["state"]["current_role"])
+            self.assertEqual({}, state["state"]["active_tasks"])
             tasks = read_json(repo / "tasks.json")
             self.assertEqual("blocked", tasks["tasks"][0]["status"])
 

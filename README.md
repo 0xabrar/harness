@@ -73,7 +73,7 @@ The harness writes these files into the target repo:
 |---|---|
 | `tasks.json` | Canonical task DAG |
 | `plan.md` | Human-readable plan |
-| `harness-state.json` | Current run snapshot (role, task, attempt) |
+| `harness-state.json` | Current run snapshot (active tasks, planner intent, counters) |
 | `harness-events.tsv` | Append-only audit log |
 | `harness-launch.json` | Launch config (goal, scope, policy) |
 | `harness-runtime.json` | Runtime status (PID, last decision) |

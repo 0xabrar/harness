@@ -77,13 +77,12 @@ When a turn returns empty `final_message`, check the `error` field in the turn r
 - `evaluate_supervisor_status` accepts an optional `report_override` parameter.
 - When provided, it uses the report directly instead of reading from disk.
 - The report is always written to disk regardless (for auditability and so events/lessons can reference it).
-- Parallel implementer results should be translated into task-local runtime records under `state.active_tasks`; verifier work is then scheduled per task from that state.
 
 ### Per-Task Runtime State
 
-- `harness-state.json` now keeps task-local execution state under `state.active_tasks`.
+- `harness-state.json` keeps task-local execution state under `state.active_tasks`.
 - Each active task tracks its own role (`implementer` or `verifier`), attempt number, trial commit, thread id, and retry feedback.
-- The legacy `current_task_id` / `current_role` slot still exists for prompt compatibility and status summaries, but it is no longer the source of truth for parallel execution.
+- Sequential execution is just the one-task case of the same model; there is no separate single-slot runtime state anymore.
 
 ## Testing
 

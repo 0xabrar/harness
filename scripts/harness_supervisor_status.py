@@ -11,10 +11,10 @@ from harness_artifacts import (
     HarnessError,
     append_event,
     all_tasks_done,
+    all_ready_tasks,
     default_paths,
-    git_head_commit,
     load_tasks,
-    next_ready_task,
+    normalize_state_payload,
     read_json,
     refresh_ready_tasks,
     report_path_for_role,
@@ -26,16 +26,50 @@ from harness_artifacts import (
 from harness_lessons import append_lesson
 
 
-def context_string(state: dict[str, Any]) -> str:
-    config = state.get("config", {})
+def _active_tasks(state_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return normalize_state_payload(state_payload)["state"]["active_tasks"]
+
+
+def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
+    return (int(task.get("priority", 100)), str(task["id"]))
+
+
+def _sorted_active_task_ids(tasks_payload: dict[str, Any], state_payload: dict[str, Any], *, role: str) -> list[str]:
+    active = _active_tasks(state_payload)
+    index = task_index(tasks_payload)
+    ids = [task_id for task_id, record in active.items() if str(record.get("role") or "") == role]
+    ids.sort(key=lambda task_id: _task_sort_key(index.get(task_id, {"id": task_id, "priority": 100})))
+    return ids
+
+
+def _ready_tasks_not_active(tasks_payload: dict[str, Any], state_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    active = _active_tasks(state_payload)
+    return [task for task in all_ready_tasks(tasks_payload) if str(task["id"]) not in active]
+
+
+def _active_role_summary(tasks_payload: dict[str, Any], state_payload: dict[str, Any]) -> str:
+    if _sorted_active_task_ids(tasks_payload, state_payload, role="verifier"):
+        return "verifier"
+    if _sorted_active_task_ids(tasks_payload, state_payload, role="implementer"):
+        return "implementer"
+    if str(state_payload["state"].get("planner_pending_reason") or ""):
+        return "planner"
+    return ""
+
+
+def context_string(state_payload: dict[str, Any], tasks_payload: dict[str, Any] | None = None) -> str:
+    config = state_payload.get("config", {})
+    role = ""
+    if tasks_payload is not None:
+        role = _active_role_summary(tasks_payload, state_payload)
     return (
         f"goal={config.get('goal', '')}; "
         f"scope={config.get('scope', '')}; "
-        f"role={state['state'].get('current_role', '')}"
+        f"role={role}"
     )
 
 
-def _append_summary_lesson(paths, state_payload: dict[str, Any], outcome: str, insight: str) -> None:
+def _append_summary_lesson(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any], outcome: str, insight: str) -> None:
     append_lesson(
         path=paths.lessons,
         title=f"Run summary: {state_payload['config'].get('goal', 'Harness run')}",
@@ -43,7 +77,7 @@ def _append_summary_lesson(paths, state_payload: dict[str, Any], outcome: str, i
         strategy="Runtime completion summary",
         outcome=outcome,
         insight=insight,
-        context=context_string(state_payload),
+        context=context_string(state_payload, tasks_payload),
         iteration=str(state_payload["state"].get("seq", 0)),
     )
 
@@ -54,34 +88,45 @@ def revert_trial_commit(repo: Path, trial_commit: str) -> None:
         raise HarnessError(completed.stderr.strip() or f"Failed to revert commit {trial_commit}")
 
 
+def _detect_role(state_payload: dict[str, Any], tasks_payload: dict[str, Any], report_override: dict[str, Any] | None) -> str:
+    if report_override is not None:
+        report_role = str(report_override.get("role") or "")
+        if report_role:
+            return report_role
+    if _sorted_active_task_ids(tasks_payload, state_payload, role="verifier"):
+        return "verifier"
+    if _sorted_active_task_ids(tasks_payload, state_payload, role="implementer"):
+        return "implementer"
+    return "planner"
+
+
 def planner_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any], *, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
     current_revision = int(state_payload["state"].get("planner_revision", 0))
     report_path = report_path_for_role(paths, "planner", planner_revision=current_revision + 1)
     if report_override is not None:
         report = report_override
-        write_json_atomic(report_path, report)  # persist for audit
+        write_json_atomic(report_path, report)
     else:
         if not report_path.exists():
             raise HarnessError(f"Planner report missing: {report_path}")
         report = read_json(report_path)
+
     revision = max(
         int(tasks_payload.get("planner_revision", 0)),
         int(report.get("revision") or report.get("plan_revision") or (current_revision + 1)),
     )
     state_payload["state"]["planner_revision"] = revision
     state_payload["state"]["planner_runs"] += 1
+    state_payload["state"]["planner_pending_reason"] = ""
     state_payload["state"]["last_status"] = "plan"
 
     tasks_payload = refresh_ready_tasks(tasks_payload)
     if all_tasks_done(tasks_payload):
         state_payload["state"]["completed"] = True
-        state_payload["state"]["current_role"] = ""
-        state_payload["state"]["current_task_id"] = ""
-        state_payload["state"]["current_attempt"] = 0
         return {"decision": "stop", "reason": "all_tasks_done", "report": report, "tasks": tasks_payload}
 
-    task = next_ready_task(tasks_payload)
-    if task is None:
+    ready_tasks = _ready_tasks_not_active(tasks_payload, state_payload)
+    if not ready_tasks:
         state_payload["state"]["needs_human"] += 1
         return {
             "decision": "needs_human",
@@ -90,25 +135,45 @@ def planner_report_state(paths, state_payload: dict[str, Any], tasks_payload: di
             "tasks": tasks_payload,
         }
 
-    state_payload["state"]["current_role"] = "implementer"
-    state_payload["state"]["current_task_id"] = str(task["id"])
-    state_payload["state"]["current_attempt"] = int(task.get("attempts", 0)) + 1
+    active = _active_tasks(state_payload)
+    for task in ready_tasks:
+        active[str(task["id"])] = {
+            "role": "implementer",
+            "attempt": int(task.get("attempts", 0)) + 1,
+            "trial_commit": "",
+            "thread_id": str(active.get(str(task["id"]), {}).get("thread_id") or ""),
+            "verifier_feedback": str(active.get(str(task["id"]), {}).get("verifier_feedback") or ""),
+        }
     return {"decision": "relaunch", "reason": "dispatch_implementer", "report": report, "tasks": tasks_payload}
 
 
 def implementer_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any], *, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
-    task_id = str(state_payload["state"].get("current_task_id") or "")
-    attempt = int(state_payload["state"].get("current_attempt") or 0)
-    if not task_id or not attempt:
-        raise HarnessError("Implementer state is missing current task or attempt.")
-    report_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
-    if report_override is not None:
-        report = report_override
-        write_json_atomic(report_path, report)  # persist for audit
-    else:
+    role_ids = _sorted_active_task_ids(tasks_payload, state_payload, role="implementer")
+    report = report_override
+    if report is None:
+        if len(role_ids) != 1:
+            raise HarnessError("Implementer state is ambiguous without an explicit report.")
+        task_id = role_ids[0]
+        record = _active_tasks(state_payload)[task_id]
+        attempt = int(record.get("attempt") or 0)
+        report_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
         if not report_path.exists():
             raise HarnessError(f"Implementer report missing: {report_path}")
         report = read_json(report_path)
+
+    task_id = str(report.get("task_id") or (role_ids[0] if len(role_ids) == 1 else ""))
+    if not task_id:
+        raise HarnessError("Implementer report is missing task_id.")
+    record = _active_tasks(state_payload).get(task_id)
+    if record is None:
+        raise HarnessError(f"Implementer state missing active task {task_id}.")
+    attempt = int(report.get("attempt") or record.get("attempt") or 0)
+    if not attempt:
+        raise HarnessError("Implementer state is missing current task attempt.")
+
+    report_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
+    write_json_atomic(report_path, report)
+
     commit = str(report.get("commit") or report.get("trial_commit") or "")
     if not commit:
         raise HarnessError("Implementer report must include a commit.")
@@ -118,95 +183,108 @@ def implementer_report_state(paths, state_payload: dict[str, Any], tasks_payload
     task["status"] = "in_progress"
     task["attempts"] = attempt
     task["last_attempt_commit"] = commit
-    tasks_payload["updated_at"] = tasks_payload.get("updated_at")
+
+    _active_tasks(state_payload)[task_id] = {
+        "role": "verifier",
+        "attempt": attempt,
+        "trial_commit": commit,
+        "thread_id": str(record.get("thread_id") or ""),
+        "verifier_feedback": "",
+    }
 
     state_payload["state"]["implementer_runs"] += 1
-    state_payload["state"]["trial_commit"] = commit
     state_payload["state"]["last_status"] = "submit_trial"
-    state_payload["state"]["current_role"] = "verifier"
     return {"decision": "relaunch", "reason": "dispatch_verifier", "report": report, "tasks": tasks_payload}
 
 
 def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: dict[str, Any], *, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
-    task_id = str(state_payload["state"].get("current_task_id") or "")
-    attempt = int(state_payload["state"].get("current_attempt") or 0)
-    trial_commit = str(state_payload["state"].get("trial_commit") or "")
-    if not task_id or not attempt or not trial_commit:
-        raise HarnessError("Verifier state is missing current task, attempt, or trial commit.")
-    verdict_path = report_path_for_role(paths, "verifier", task_id=task_id, attempt=attempt)
-    impl_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
-    if report_override is not None:
-        verdict = report_override
-        write_json_atomic(verdict_path, verdict)  # persist for audit
-    else:
+    role_ids = _sorted_active_task_ids(tasks_payload, state_payload, role="verifier")
+    report = report_override
+    if report is None:
+        if len(role_ids) != 1:
+            raise HarnessError("Verifier state is ambiguous without an explicit report.")
+        task_id = role_ids[0]
+        record = _active_tasks(state_payload)[task_id]
+        attempt = int(record.get("attempt") or 0)
+        verdict_path = report_path_for_role(paths, "verifier", task_id=task_id, attempt=attempt)
         if not verdict_path.exists():
             raise HarnessError(f"Verifier report missing: {verdict_path}")
-        verdict = read_json(verdict_path)
-    implementer = read_json(impl_path)
-    index = task_index(tasks_payload)
-    task = index[task_id]
+        report = read_json(verdict_path)
 
-    verdict_value = str(verdict.get("verdict") or "")
-    if verdict_value not in {"accept", "revert", "needs_human"}:
+    task_id = str(report.get("task_id") or (role_ids[0] if len(role_ids) == 1 else ""))
+    if not task_id:
+        raise HarnessError("Verifier report is missing task_id.")
+    active = _active_tasks(state_payload)
+    record = active.get(task_id)
+    if record is None:
+        raise HarnessError(f"Active verifier state missing for task {task_id}.")
+
+    attempt = int(report.get("attempt") or record.get("attempt") or 0)
+    commit = str(report.get("commit") or report.get("evaluated_commit") or report.get("trial_commit") or record.get("trial_commit") or "")
+    if not commit:
+        raise HarnessError(f"Verifier report for {task_id} must identify the evaluated commit.")
+
+    verdict = str(report.get("verdict") or "")
+    if verdict not in {"accept", "revert", "needs_human"}:
         raise HarnessError("Verifier verdict must be accept, revert, or needs_human.")
 
-    proposed_tasks = list(implementer.get("proposed_tasks") or []) + list(verdict.get("proposed_tasks") or [])
-    state_payload["state"]["verifier_runs"] += 1
-    state_payload["state"]["last_verdict"] = verdict_value
-    state_payload["state"]["last_status"] = verdict_value
+    verdict_path = report_path_for_role(paths, "verifier", task_id=task_id, attempt=attempt)
+    write_json_atomic(verdict_path, report)
 
-    if verdict_value == "accept":
+    implementer = read_json(report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt))
+    proposed_tasks = list(implementer.get("proposed_tasks") or []) + list(report.get("proposed_tasks") or [])
+
+    index = task_index(tasks_payload)
+    task = index[task_id]
+    summary = str(report.get("summary") or f"Verifier returned {verdict}.")
+
+    state_payload["state"]["verifier_runs"] += 1
+    state_payload["state"]["last_verdict"] = verdict
+    state_payload["state"]["last_status"] = verdict
+
+    if verdict == "accept":
         task["status"] = "done"
         task["last_verdict"] = "accept"
         state_payload["state"]["accepts"] += 1
-        state_payload["state"]["accepted_commit"] = trial_commit
-        state_payload["state"]["trial_commit"] = ""
+        state_payload["state"]["accepted_commit"] = commit
+        active.pop(task_id, None)
         append_lesson(
             path=paths.lessons,
             title=f"Accepted task {task_id}",
             category="task",
             strategy=str(implementer.get("summary") or f"Completed {task_id}"),
             outcome="accept",
-            insight=str(verdict.get("summary") or "Verifier accepted the task."),
-            context=context_string(state_payload),
-            iteration=str(state_payload["state"].get("seq", 0) + 1),
+            insight=summary,
+            context=context_string(state_payload, tasks_payload),
+            iteration=str(int(state_payload["state"].get("seq", 0)) + 1),
         )
         if proposed_tasks:
-            state_payload["state"]["current_role"] = "planner"
-            state_payload["state"]["current_task_id"] = ""
-            state_payload["state"]["current_attempt"] = 0
-            state_payload["state"]["replans"] += 1
-            return {"decision": "relaunch", "reason": "planner_update_requested", "report": verdict, "tasks": tasks_payload}
+            state_payload["state"]["planner_pending_reason"] = "planner_update_requested"
+
         tasks_payload = refresh_ready_tasks(tasks_payload)
         if all_tasks_done(tasks_payload):
             state_payload["state"]["completed"] = True
-            state_payload["state"]["current_role"] = ""
-            state_payload["state"]["current_task_id"] = ""
-            state_payload["state"]["current_attempt"] = 0
-            return {"decision": "stop", "reason": "all_tasks_done", "report": verdict, "tasks": tasks_payload}
-        next_task = next_ready_task(tasks_payload)
-        if next_task is None:
-            state_payload["state"]["current_role"] = "planner"
-            state_payload["state"]["current_task_id"] = ""
-            state_payload["state"]["current_attempt"] = 0
-            return {"decision": "relaunch", "reason": "planner_replan_needed", "report": verdict, "tasks": tasks_payload}
-        state_payload["state"]["current_role"] = "implementer"
-        state_payload["state"]["current_task_id"] = str(next_task["id"])
-        state_payload["state"]["current_attempt"] = int(next_task.get("attempts", 0)) + 1
-        return {"decision": "relaunch", "reason": "dispatch_implementer", "report": verdict, "tasks": tasks_payload}
+            return {"decision": "stop", "reason": "all_tasks_done", "report": report, "tasks": tasks_payload}
+        if not _active_tasks(state_payload) and not _ready_tasks_not_active(tasks_payload, state_payload):
+            state_payload["state"]["planner_pending_reason"] = state_payload["state"].get("planner_pending_reason") or "planner_replan_needed"
+            return {
+                "decision": "relaunch",
+                "reason": str(state_payload["state"]["planner_pending_reason"]),
+                "report": report,
+                "tasks": tasks_payload,
+            }
+        return {"decision": "relaunch", "reason": "continue_after_accept", "report": report, "tasks": tasks_payload}
 
-    if verdict_value == "needs_human":
+    if verdict == "needs_human":
         task["status"] = "blocked"
-        task["blocked_reason"] = str(verdict.get("summary") or "Verifier escalated for human review.")
+        task["blocked_reason"] = summary
         state_payload["state"]["needs_human"] += 1
-        state_payload["state"]["current_role"] = ""
-        state_payload["state"]["current_task_id"] = ""
-        state_payload["state"]["current_attempt"] = 0
-        return {"decision": "needs_human", "reason": "verifier_escalated", "report": verdict, "tasks": tasks_payload}
+        state_payload["state"]["blocked"] += 1
+        active.pop(task_id, None)
+        return {"decision": "needs_human", "reason": "verifier_escalated", "report": report, "tasks": tasks_payload}
 
-    revert_trial_commit(paths.repo, trial_commit)
+    revert_trial_commit(paths.repo, commit)
     state_payload["state"]["reverts"] += 1
-    state_payload["state"]["trial_commit"] = ""
     task["last_verdict"] = "revert"
     append_lesson(
         path=paths.lessons,
@@ -214,61 +292,69 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
         category="task",
         strategy=str(implementer.get("summary") or f"Attempt {attempt} for {task_id}"),
         outcome="revert",
-        insight=str(verdict.get("summary") or "Verifier rejected the trial commit."),
-        context=context_string(state_payload),
-        iteration=str(state_payload["state"].get("seq", 0) + 1),
+        insight=summary,
+        context=context_string(state_payload, tasks_payload),
+        iteration=str(int(state_payload["state"].get("seq", 0)) + 1),
     )
+
     max_attempts = int(state_payload["config"].get("max_task_attempts", 3))
     if int(task.get("attempts", 0)) >= max_attempts:
         task["status"] = "failed"
-        task["blocked_reason"] = str(verdict.get("summary") or "Verifier rejected the task repeatedly.")
-        state_payload["state"]["current_role"] = "planner"
-        state_payload["state"]["current_task_id"] = ""
-        state_payload["state"]["current_attempt"] = 0
+        task["blocked_reason"] = summary
+        active.pop(task_id, None)
         state_payload["state"]["replans"] += 1
+        state_payload["state"]["planner_pending_reason"] = "planner_replan_after_revert"
         append_lesson(
             path=paths.lessons,
             title=f"Replan task {task_id}",
             category="planner",
             strategy=f"Task {task_id} exhausted {max_attempts} implementation attempts",
             outcome="replan",
-            insight=str(verdict.get("summary") or "Repeated verifier rejection triggered replanning."),
-            context=context_string(state_payload),
-            iteration=str(state_payload["state"].get("seq", 0) + 1),
+            insight=summary,
+            context=context_string(state_payload, tasks_payload),
+            iteration=str(int(state_payload["state"].get("seq", 0)) + 1),
         )
-        return {"decision": "relaunch", "reason": "planner_replan_after_revert", "report": verdict, "tasks": tasks_payload}
+        return {"decision": "relaunch", "reason": "planner_replan_after_revert", "report": report, "tasks": tasks_payload}
+
+    if proposed_tasks:
+        task["status"] = "ready"
+        active.pop(task_id, None)
+        state_payload["state"]["replans"] += 1
+        state_payload["state"]["planner_pending_reason"] = "planner_update_requested"
+        return {"decision": "relaunch", "reason": "planner_update_requested", "report": report, "tasks": tasks_payload}
 
     task["status"] = "ready"
-    if proposed_tasks:
-        state_payload["state"]["current_role"] = "planner"
-        state_payload["state"]["current_task_id"] = ""
-        state_payload["state"]["current_attempt"] = 0
-        state_payload["state"]["replans"] += 1
-        return {"decision": "relaunch", "reason": "planner_update_requested", "report": verdict, "tasks": tasks_payload}
-    state_payload["state"]["current_role"] = "implementer"
-    state_payload["state"]["current_task_id"] = task_id
-    state_payload["state"]["current_attempt"] = int(task.get("attempts", 0)) + 1
-    return {"decision": "relaunch", "reason": "retry_task", "report": verdict, "tasks": tasks_payload}
+    active[task_id] = {
+        "role": "implementer",
+        "attempt": attempt + 1,
+        "trial_commit": "",
+        "thread_id": str(record.get("thread_id") or ""),
+        "verifier_feedback": summary,
+    }
+    return {"decision": "relaunch", "reason": "retry_task", "report": report, "tasks": tasks_payload}
 
 
 def evaluate_supervisor_status(*, repo: str | Path | None = None, report_override: dict[str, Any] | None = None) -> dict[str, Any]:
     paths = default_paths(repo)
-    state_payload = read_json(paths.state)
+    state_payload = normalize_state_payload(read_json(paths.state))
     tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))
-    role = str(state_payload["state"].get("current_role") or "")
+    role = _detect_role(state_payload, tasks_payload, report_override)
     seq = int(state_payload["state"].get("seq", 0)) + 1
-    original_task_id = str(state_payload["state"].get("current_task_id") or "")
-    original_attempt = int(state_payload["state"].get("current_attempt") or 0)
-    original_trial_commit = str(state_payload["state"].get("trial_commit") or "")
 
     if role == "planner":
         outcome = planner_report_state(paths, state_payload, tasks_payload, report_override=report_override)
+        event_task_id = ""
+        event_attempt = 0
     elif role == "implementer":
         outcome = implementer_report_state(paths, state_payload, tasks_payload, report_override=report_override)
+        event_task_id = str(outcome["report"].get("task_id") or "")
+        event_attempt = int(outcome["report"].get("attempt") or 0)
     elif role == "verifier":
         outcome = verifier_report_state(paths, state_payload, tasks_payload, report_override=report_override)
+        event_task_id = str(outcome["report"].get("task_id") or "")
+        event_attempt = int(outcome["report"].get("attempt") or 0)
     else:
-        raise HarnessError(f"Unsupported current role in state: {role!r}")
+        raise HarnessError(f"Unsupported role: {role!r}")
 
     tasks_payload = outcome["tasks"]
     write_tasks(paths.tasks, tasks_payload)
@@ -278,13 +364,11 @@ def evaluate_supervisor_status(*, repo: str | Path | None = None, report_overrid
     state_payload["state"]["seq"] = seq
     state_payload["updated_at"] = utc_now()
     write_json_atomic(paths.state, state_payload)
-    event_task_id = original_task_id if role in {"implementer", "verifier"} else ""
-    event_attempt = original_attempt if role in {"implementer", "verifier"} else 0
     event_commit = str(
         report.get("commit")
         or report.get("trial_commit")
         or report.get("evaluated_commit")
-        or original_trial_commit
+        or _active_tasks(state_payload).get(event_task_id, {}).get("trial_commit")
         or "-"
     )
     row = append_event(
@@ -303,20 +387,19 @@ def evaluate_supervisor_status(*, repo: str | Path | None = None, report_overrid
         _append_summary_lesson(
             paths,
             state_payload,
+            tasks_payload,
             "summary",
             f"Accepted {state_payload['state'].get('accepts', 0)} tasks and reverted {state_payload['state'].get('reverts', 0)} trial commits.",
         )
-    if outcome["decision"] == "needs_human":
-        write_json_atomic(paths.state, state_payload)
 
     return {
         "decision": outcome["decision"],
         "reason": outcome["reason"],
         "seq": seq,
         "role": role,
-        "task_id": original_task_id,
+        "task_id": event_task_id,
         "event": row,
-        "current_role": state_payload["state"].get("current_role", ""),
+        "active_role": _active_role_summary(tasks_payload, state_payload),
     }
 
 

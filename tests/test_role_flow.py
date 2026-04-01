@@ -55,8 +55,8 @@ class RoleFlowTests(unittest.TestCase):
             planner_decision = evaluate_supervisor_status(repo=tmp)
             self.assertEqual(planner_decision["decision"], "relaunch")
             state = read_json(paths.state)
-            self.assertEqual(state["state"]["current_role"], "implementer")
-            self.assertEqual(state["state"]["current_task_id"], "T-001")
+            self.assertEqual(state["state"]["active_tasks"]["T-001"]["role"], "implementer")
+            self.assertEqual(state["state"]["active_tasks"]["T-001"]["attempt"], 1)
 
             implementer_report = paths.reports / "impl-T-001-a1.json"
             write_json_atomic(
@@ -75,8 +75,8 @@ class RoleFlowTests(unittest.TestCase):
             implementer_decision = evaluate_supervisor_status(repo=tmp)
             self.assertEqual(implementer_decision["reason"], "dispatch_verifier")
             state = read_json(paths.state)
-            self.assertEqual(state["state"]["current_role"], "verifier")
-            self.assertEqual(state["state"]["trial_commit"], "abc1234")
+            self.assertEqual(state["state"]["active_tasks"]["T-001"]["role"], "verifier")
+            self.assertEqual(state["state"]["active_tasks"]["T-001"]["trial_commit"], "abc1234")
 
             verifier_report = paths.reports / "verdict-T-001-a1.json"
             write_json_atomic(
@@ -96,6 +96,7 @@ class RoleFlowTests(unittest.TestCase):
             self.assertEqual(verifier_decision["decision"], "stop")
             state = read_json(paths.state)
             self.assertTrue(state["state"]["completed"])
+            self.assertEqual(state["state"]["active_tasks"], {})
 
     def test_planner_prompt_mentions_canonical_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

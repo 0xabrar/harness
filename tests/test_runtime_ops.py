@@ -301,30 +301,6 @@ class TestRunRuntimeUsesAppServer(unittest.TestCase):
 class TestThreadResume(unittest.TestCase):
     """Verify that run_runtime passes resume_thread_id on implementer retries."""
 
-    def _make_state(self, role: str, task_id: str = "T-001", attempt: int = 1, trial_commit: str = "") -> dict:
-        return {
-            "config": {"goal": "test", "scope": ".", "max_task_attempts": 3},
-            "state": {
-                "current_role": role,
-                "current_task_id": task_id,
-                "current_attempt": attempt,
-                "trial_commit": trial_commit,
-                "seq": 0,
-                "planner_revision": 0,
-                "planner_runs": 0,
-                "implementer_runs": 0,
-                "verifier_runs": 0,
-                "accepts": 0,
-                "reverts": 0,
-                "needs_human": 0,
-                "replans": 0,
-                "completed": False,
-                "last_status": "",
-                "last_decision": "",
-                "last_verdict": "",
-            },
-        }
-
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
     def test_first_implementer_call_has_no_resume_id(self, _mock_schema: Any) -> None:
         """On the first implementer attempt for a task, resume_thread_id should be None."""

@@ -4,13 +4,43 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from harness_artifacts import HarnessError, Paths, default_paths, load_tasks, next_ready_task, read_json, refresh_ready_tasks
+from harness_artifacts import (
+    HarnessError,
+    Paths,
+    default_paths,
+    load_tasks,
+    next_ready_task,
+    normalize_state_payload,
+    read_json,
+    refresh_ready_tasks,
+    task_index,
+)
 
 
 def state_context(paths: Paths) -> tuple[dict, dict]:
-    state = read_json(paths.state)
+    state = normalize_state_payload(read_json(paths.state))
     tasks = load_tasks(paths.tasks)
     return state, refresh_ready_tasks(tasks)
+
+
+def _task_sort_key(task: dict) -> tuple[int, str]:
+    return (int(task.get("priority", 100)), str(task["id"]))
+
+
+def _active_task_record(state: dict, tasks: dict, *, role: str) -> tuple[dict, dict] | tuple[None, None]:
+    active = state.get("state", {}).get("active_tasks", {})
+    if not isinstance(active, dict):
+        return None, None
+    index = task_index(tasks)
+    matching_ids = [task_id for task_id, record in active.items() if str(record.get("role") or "") == role]
+    if not matching_ids:
+        return None, None
+    matching_ids.sort(key=lambda task_id: _task_sort_key(index.get(task_id, {"id": task_id, "priority": 100})))
+    task_id = matching_ids[0]
+    task = index.get(task_id)
+    if task is None:
+        raise HarnessError(f"Active task {task_id!r} is missing from tasks.json.")
+    return task, active[task_id]
 
 
 def build_planner_prompt(paths: Paths) -> str:
@@ -62,27 +92,19 @@ Fields: role, revision, summary, task_changes (added/updated/closed arrays), pla
 
 def build_implementer_prompt(paths: Paths) -> str:
     state, tasks = state_context(paths)
-    current_task_id = str(state["state"].get("current_task_id") or "")
-    current_attempt = int(state["state"].get("current_attempt") or 0)
-    if current_task_id:
-        task = next((item for item in tasks["tasks"] if str(item["id"]) == current_task_id), None)
-    else:
+    task, record = _active_task_record(state, tasks, role="implementer")
+    if task is None:
         task = next_ready_task(tasks)
+        record = {}
     if task is None:
         raise HarnessError("No task is available for the implementer.")
-    attempt = current_attempt or (int(task.get("attempts", 0)) + 1)
+    attempt = int((record or {}).get("attempt") or (int(task.get("attempts", 0)) + 1))
     criteria = "\n".join(f"- {item}" for item in task.get("acceptance_criteria", []))
     return _implementer_prompt_body(paths, task, attempt, criteria)
 
 
 def build_implementer_prompt_for_task(paths: Paths, task: dict, *, attempt: int | None = None) -> str:
-    """Build an implementer prompt for a specific task.
-
-    The runtime may supply an explicit *attempt* when re-dispatching a task
-    from per-task execution state (for example after a verifier-triggered
-    retry). When omitted, the prompt derives the next attempt from the task's
-    recorded attempt count.
-    """
+    """Build an implementer prompt for a specific task."""
     attempt = attempt or (int(task.get("attempts", 0)) + 1)
     criteria = "\n".join(f"- {item}" for item in task.get("acceptance_criteria", []))
     return _implementer_prompt_body(paths, task, attempt, criteria)
@@ -130,15 +152,29 @@ Fields: role, task_id, attempt, commit, summary, files_changed, checks_run, prop
 """
 
 
-def build_verifier_prompt(paths: Paths) -> str:
-    state = read_json(paths.state)
-    task_id = str(state["state"].get("current_task_id") or "")
-    attempt = int(state["state"].get("current_attempt") or 0)
-    trial_commit = str(state["state"].get("trial_commit") or "")
-    if not task_id or not attempt or not trial_commit:
-        raise HarnessError("Verifier prompt requires current task, attempt, and trial commit in state.")
+def build_verifier_prompt(
+    paths: Paths,
+    *,
+    task_id: str | None = None,
+    attempt: int | None = None,
+    trial_commit: str | None = None,
+) -> str:
+    state = normalize_state_payload(read_json(paths.state))
     tasks = refresh_ready_tasks(load_tasks(paths.tasks))
-    task = next(task for task in tasks["tasks"] if str(task["id"]) == task_id)
+    if task_id:
+        task = task_index(tasks).get(str(task_id))
+        if task is None:
+            raise HarnessError(f"Task {task_id!r} is missing from tasks.json.")
+        record = state["state"].get("active_tasks", {}).get(str(task_id), {})
+    else:
+        task, record = _active_task_record(state, tasks, role="verifier")
+        if task is None:
+            raise HarnessError("Verifier prompt requires an active verifier task.")
+    task_id = str(task["id"])
+    attempt = int(attempt or record.get("attempt") or 0)
+    trial_commit = str(trial_commit or record.get("trial_commit") or "")
+    if not attempt or not trial_commit:
+        raise HarnessError("Verifier prompt requires task attempt and trial commit.")
     criteria = "\n".join(f"- {item}" for item in task.get("acceptance_criteria", []))
     return f"""$harness
 You are the verifier role for this harness-managed repo. Default to skepticism — you are here to verify, not to approve.

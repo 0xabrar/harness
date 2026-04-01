@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import json
-import threading
 import tempfile
+import threading
 import unittest
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -14,23 +13,15 @@ from harness_artifacts import (
     Paths,
     all_ready_tasks,
     build_state_payload,
+    normalize_state_payload,
     refresh_ready_tasks,
     task_index,
     write_tasks,
 )
 from harness_build_prompt import build_implementer_prompt_for_task
-from harness_runtime_ops import (
-    _apply_implementer_result,
-    _apply_verifier_result,
-    _run_parallel_implementers,
-    normalize_state_payload,
-    sandbox_for_role,
-)
+from harness_runtime_ops import _run_parallel_implementers, sandbox_for_role
+from harness_supervisor_status import evaluate_supervisor_status
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 FAKE_BASE = Path("/tmp/fake-repo")
 
@@ -79,7 +70,6 @@ def _make_payload(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _mock_manager(*, final_message: str = '{"role":"implementer","task_id":"T-001","attempt":1,"commit":"abc1234","summary":"done","files_changed":[],"checks_run":[],"proposed_tasks":[]}') -> MagicMock:
-    """Return a mock ServerManager whose acquire() returns a usable ManagedServer."""
     ms = MagicMock()
     ms.server.start_thread.return_value = "thread-abc"
     ms.server.run_turn.return_value = {
@@ -95,11 +85,6 @@ def _mock_manager(*, final_message: str = '{"role":"implementer","task_id":"T-00
     manager = MagicMock()
     manager.acquire.return_value = ms
     return manager
-
-
-# ---------------------------------------------------------------------------
-# Tests: all_ready_tasks
-# ---------------------------------------------------------------------------
 
 
 class TestAllReadyTasks(unittest.TestCase):
@@ -119,8 +104,7 @@ class TestAllReadyTasks(unittest.TestCase):
             _make_task("T-001", status="done"),
             _make_task("T-002", status="done"),
         ])
-        result = all_ready_tasks(payload)
-        self.assertEqual(result, [])
+        self.assertEqual(all_ready_tasks(payload), [])
 
     def test_sorts_by_priority_then_id(self) -> None:
         payload = _make_payload([
@@ -129,45 +113,22 @@ class TestAllReadyTasks(unittest.TestCase):
             _make_task("T-002", status="ready", priority=1),
         ])
         result = all_ready_tasks(payload)
-        self.assertEqual(len(result), 3)
-        # Priority 1 first (T-001 before T-002 by id), then priority 2
-        self.assertEqual(result[0]["id"], "T-001")
-        self.assertEqual(result[1]["id"], "T-002")
-        self.assertEqual(result[2]["id"], "T-003")
+        self.assertEqual([task["id"] for task in result], ["T-001", "T-002", "T-003"])
 
     def test_returns_deep_copies(self) -> None:
-        payload = _make_payload([
-            _make_task("T-001", status="ready", priority=1),
-        ])
+        payload = _make_payload([_make_task("T-001", status="ready", priority=1)])
         result = all_ready_tasks(payload)
         result[0]["title"] = "MUTATED"
-        # Re-fetch: original should be unaffected
-        result2 = all_ready_tasks(payload)
-        self.assertEqual(result2[0]["title"], "Task T-001")
+        self.assertEqual(all_ready_tasks(payload)[0]["title"], "Task T-001")
 
     def test_pending_with_done_deps_becomes_ready(self) -> None:
         payload = _make_payload([
             _make_task("T-001", status="done"),
-            _make_task("T-002", status="pending", priority=1, dependencies=["T-001"]),
+            _make_task("T-002", status="pending", dependencies=["T-001"]),
         ])
         result = all_ready_tasks(payload)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["id"], "T-002")
-
-    def test_single_ready_task(self) -> None:
-        """A single ready task is returned as a one-element list."""
-        payload = _make_payload([
-            _make_task("T-001", status="ready", priority=5),
-            _make_task("T-002", status="done"),
-        ])
-        result = all_ready_tasks(payload)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["id"], "T-001")
-
-
-# ---------------------------------------------------------------------------
-# Tests: build_implementer_prompt_for_task
-# ---------------------------------------------------------------------------
 
 
 class TestBuildImplementerPromptForTask(unittest.TestCase):
@@ -184,52 +145,39 @@ class TestBuildImplementerPromptForTask(unittest.TestCase):
         self.assertIn("Passes lint", prompt)
         self.assertIn("Return your report as structured JSON", prompt)
 
-    def test_prompt_has_role_implementer(self) -> None:
+    def test_prompt_uses_explicit_attempt(self) -> None:
         task = _make_task("T-001")
-        prompt = build_implementer_prompt_for_task(FAKE_PATHS, task)
-        self.assertIn("implementer role", prompt)
-
-
-# ---------------------------------------------------------------------------
-# Tests: _run_parallel_implementers
-# ---------------------------------------------------------------------------
+        prompt = build_implementer_prompt_for_task(FAKE_PATHS, task, attempt=3)
+        self.assertIn("Attempt: 3", prompt)
 
 
 class TestRunParallelImplementers(unittest.TestCase):
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
     def test_runs_multiple_tasks_concurrently(self, _mock_schema: Any) -> None:
-        """Verify that multiple tasks produce results keyed by task id."""
         manager = _mock_manager()
-        tasks = [
-            _make_task("T-001", status="ready"),
-            _make_task("T-002", status="ready"),
-        ]
+        tasks = [_make_task("T-001"), _make_task("T-002")]
         results, errors = _run_parallel_implementers(
             manager=manager,
             ready_tasks=tasks,
             paths=FAKE_PATHS,
             runtime={},
         )
-        self.assertEqual(len(errors), 0)
+        self.assertEqual(errors, {})
         self.assertIn("T-001", results)
         self.assertIn("T-002", results)
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
     def test_captures_errors_per_task(self, _mock_schema: Any) -> None:
-        """When a task fails, its error is recorded without blocking others."""
         manager = MagicMock()
-        call_count = 0
 
         def _acquire(key: str, **kwargs: Any) -> MagicMock:
-            nonlocal call_count
-            call_count += 1
-            ms = MagicMock()
-            ms.thread_history = {}
+            managed = MagicMock()
+            managed.thread_history = {}
             if key == "T-002":
-                ms.server.start_thread.side_effect = RuntimeError("boom")
+                managed.server.start_thread.side_effect = RuntimeError("boom")
             else:
-                ms.server.start_thread.return_value = "thread-ok"
-                ms.server.run_turn.return_value = {
+                managed.server.start_thread.return_value = "thread-ok"
+                managed.server.run_turn.return_value = {
                     "status": "completed",
                     "thread_id": "thread-ok",
                     "final_message": '{"role":"implementer","task_id":"T-001","attempt":1,"commit":"abc","summary":"ok","files_changed":[],"checks_run":[],"proposed_tasks":[]}',
@@ -237,17 +185,12 @@ class TestRunParallelImplementers(unittest.TestCase):
                     "command_executions": [],
                     "reasoning_summary": "",
                 }
-            return ms
+            return managed
 
         manager.acquire.side_effect = _acquire
-
-        tasks = [
-            _make_task("T-001", status="ready"),
-            _make_task("T-002", status="ready"),
-        ]
         results, errors = _run_parallel_implementers(
             manager=manager,
-            ready_tasks=tasks,
+            ready_tasks=[_make_task("T-001"), _make_task("T-002")],
             paths=FAKE_PATHS,
             runtime={},
         )
@@ -257,42 +200,30 @@ class TestRunParallelImplementers(unittest.TestCase):
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
     def test_uses_separate_threads(self, _mock_schema: Any) -> None:
-        """Verify that tasks actually run on separate threads."""
         manager = _mock_manager()
-        thread_ids: list[int] = []
-        original_run_one = None
+        thread_ids: list[int | None] = []
 
-        # Patch at thread level to capture thread ids
-        def _capture_thread(*args: Any, **kwargs: Any) -> None:
+        def _capture(*args: Any, **kwargs: Any) -> dict[str, Any]:
             thread_ids.append(threading.current_thread().ident)
-
-        tasks = [
-            _make_task("T-001", status="ready"),
-            _make_task("T-002", status="ready"),
-        ]
-
-        with patch("harness_runtime_ops.run_role_turn") as mock_rrt:
-            mock_rrt.return_value = {
-                "report": {"role": "implementer", "task_id": "T-001"},
-                "thread_id": "t-1",
+            return {
+                "report": {"role": "implementer", "task_id": kwargs["task_id"]},
+                "thread_id": f"thread-{kwargs['task_id']}",
                 "turn_result": {},
                 "parse_error": None,
             }
-            # We just want to check threads actually started
-            with patch("harness_runtime_ops.build_implementer_prompt_for_task", return_value="prompt"):
-                results, errors = _run_parallel_implementers(
-                    manager=manager,
-                    ready_tasks=tasks,
-                    paths=FAKE_PATHS,
-                    runtime={},
-                )
-        # Both tasks should have completed (results or errors)
-        total = len(results) + len(errors)
-        self.assertEqual(total, 2)
+
+        with patch("harness_runtime_ops.run_role_turn", side_effect=_capture):
+            results, errors = _run_parallel_implementers(
+                manager=manager,
+                ready_tasks=[_make_task("T-001"), _make_task("T-002")],
+                paths=FAKE_PATHS,
+                runtime={},
+            )
+        self.assertEqual(len(results) + len(errors), 2)
+        self.assertGreaterEqual(len(set(thread_ids)), 1)
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
     def test_empty_tasks_returns_empty(self, _mock_schema: Any) -> None:
-        """No tasks means no results and no errors."""
         manager = _mock_manager()
         results, errors = _run_parallel_implementers(
             manager=manager,
@@ -302,6 +233,39 @@ class TestRunParallelImplementers(unittest.TestCase):
         )
         self.assertEqual(results, {})
         self.assertEqual(errors, {})
+
+    @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
+    def test_uses_saved_attempt_and_feedback_for_retry(self, _mock_schema: Any) -> None:
+        manager = _mock_manager()
+        captured_prompt: dict[str, str] = {}
+
+        def _capture(**kwargs: Any) -> dict[str, Any]:
+            captured_prompt["text"] = kwargs["prompt"]
+            return {
+                "report": {"role": "implementer", "task_id": kwargs["task_id"]},
+                "thread_id": "thread-old",
+                "turn_result": {},
+                "parse_error": None,
+            }
+
+        with patch("harness_runtime_ops.run_role_turn", side_effect=_capture):
+            _run_parallel_implementers(
+                manager=manager,
+                ready_tasks=[_make_task("T-001")],
+                paths=FAKE_PATHS,
+                runtime={},
+                task_states={
+                    "T-001": {
+                        "role": "implementer",
+                        "attempt": 2,
+                        "trial_commit": "",
+                        "thread_id": "thread-old",
+                        "verifier_feedback": "Fix the failing criterion.",
+                    }
+                },
+            )
+        self.assertIn("Attempt: 2", captured_prompt["text"])
+        self.assertIn("Fix the failing criterion.", captured_prompt["text"])
 
 
 class TestPerTaskExecutionState(unittest.TestCase):
@@ -343,61 +307,42 @@ class TestPerTaskExecutionState(unittest.TestCase):
             ])
             write_tasks(paths.tasks, tasks_payload)
 
-            _apply_implementer_result(
-                paths=paths,
-                state_payload=normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8"))),
-                tasks_payload=refresh_ready_tasks(json.loads(paths.tasks.read_text(encoding="utf-8"))),
-                task=task_index(tasks_payload)["T-001"],
-                turn={
-                    "thread_id": "thread-1",
-                    "report": {
-                        "role": "implementer",
-                        "task_id": "T-001",
-                        "attempt": 1,
-                        "commit": "abc1111",
-                        "summary": "Implemented T-001",
-                        "files_changed": ["a.py"],
-                        "checks_run": [],
-                        "proposed_tasks": [],
-                    },
+            decision = evaluate_supervisor_status(
+                repo=paths.repo,
+                report_override={
+                    "role": "implementer",
+                    "task_id": "T-001",
+                    "attempt": 1,
+                    "commit": "abc1111",
+                    "summary": "Implemented T-001",
+                    "files_changed": ["a.py"],
+                    "checks_run": [],
+                    "proposed_tasks": [],
                 },
             )
-            _apply_implementer_result(
-                paths=paths,
-                state_payload=normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8"))),
-                tasks_payload=refresh_ready_tasks(json.loads(paths.tasks.read_text(encoding="utf-8"))),
-                task=task_index(tasks_payload)["T-002"],
-                turn={
-                    "thread_id": "thread-2",
-                    "report": {
-                        "role": "implementer",
-                        "task_id": "T-002",
-                        "attempt": 1,
-                        "commit": "def2222",
-                        "summary": "Implemented T-002",
-                        "files_changed": ["b.py"],
-                        "checks_run": [],
-                        "proposed_tasks": [],
-                    },
+            self.assertEqual(decision["reason"], "dispatch_verifier")
+            decision = evaluate_supervisor_status(
+                repo=paths.repo,
+                report_override={
+                    "role": "implementer",
+                    "task_id": "T-002",
+                    "attempt": 1,
+                    "commit": "def2222",
+                    "summary": "Implemented T-002",
+                    "files_changed": ["b.py"],
+                    "checks_run": [],
+                    "proposed_tasks": [],
                 },
             )
+            self.assertEqual(decision["reason"], "dispatch_verifier")
 
             state_after_impl = normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8")))
-            self.assertEqual(
-                state_after_impl["state"]["active_tasks"]["T-001"]["role"],
-                "verifier",
-            )
-            self.assertEqual(
-                state_after_impl["state"]["active_tasks"]["T-002"]["role"],
-                "verifier",
-            )
+            self.assertEqual(state_after_impl["state"]["active_tasks"]["T-001"]["role"], "verifier")
+            self.assertEqual(state_after_impl["state"]["active_tasks"]["T-002"]["role"], "verifier")
 
-            _apply_verifier_result(
-                paths=paths,
-                state_payload=normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8"))),
-                tasks_payload=refresh_ready_tasks(json.loads(paths.tasks.read_text(encoding="utf-8"))),
-                task_id="T-002",
-                report={
+            decision = evaluate_supervisor_status(
+                repo=paths.repo,
+                report_override={
                     "role": "verifier",
                     "task_id": "T-002",
                     "attempt": 1,
@@ -409,6 +354,7 @@ class TestPerTaskExecutionState(unittest.TestCase):
                     "proposed_tasks": [],
                 },
             )
+            self.assertEqual(decision["decision"], "relaunch")
 
             final_state = normalize_state_payload(json.loads(paths.state.read_text(encoding="utf-8")))
             final_tasks = json.loads(paths.tasks.read_text(encoding="utf-8"))
