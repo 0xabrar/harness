@@ -81,8 +81,13 @@ When a turn returns empty `final_message`, check the `error` field in the turn r
 ### Per-Task Runtime State
 
 - `harness-state.json` keeps task-local execution state under `state.active_tasks`.
-- Each active task tracks its own role (`implementer` or `verifier`), attempt number, trial commit, thread id, and retry feedback.
+- Each active task tracks its own role (`implementer` or `verifier`), attempt number, trial commit, thread id, retry feedback, and worktree metadata (`branch_name`, `worktree_path`, `base_commit`) when isolated execution is active.
 - Sequential execution is just the one-task case of the same model; there is no separate single-slot runtime state anymore.
+
+### Prompt Reliability
+
+- The planner, implementer, and verifier prompts include explicit JSON output examples.
+- This is intentional. In live background runs, the explicit shapes materially improve structured-output reliability.
 
 ## Testing
 

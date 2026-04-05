@@ -38,8 +38,8 @@ Schedule planner when:
 
 ## Accept/Revert Semantics
 
-- `accept`: keep the trial commit, mark the task `done`, clear trial state.
-- `revert`: revert the trial commit, clear trial state, requeue or block the task, and schedule planner if needed.
+- `accept`: keep the task-local trial commit, cherry-pick it onto main, mark the task `done`, and clear task-local runtime state.
+- `revert`: leave main untouched, reset the task worktree back to its base commit, requeue or block the task, and schedule planner if needed.
 
 ## `needs_human`
 

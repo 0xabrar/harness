@@ -36,11 +36,13 @@ Purpose:
 - `plan.md`
 - `harness-state.json`
 - `harness-events.tsv`
+- `.harness-worktrees/` (ephemeral during parallel implementation)
 
 Purpose:
 - canonical DAG
 - current role/task snapshot
 - append-only audit trail
+- isolated task workspaces while parallel implementers run
 
 ## Cross-Run Lessons
 
@@ -55,6 +57,7 @@ Purpose:
 - planner owns `plan.md` and task-topology fields in `tasks.json`
 - runtime owns `harness-launch.json`, `harness-runtime.json`, `harness-state.json`, `harness-events.tsv`, and `harness-lessons.md`
 - runtime may update execution-state fields in `tasks.json` for the current task when applying verifier verdicts
+- runtime owns `.harness-worktrees/` and may create/remove task branches and worktrees as part of isolated execution
 - implementer and verifier own only their role reports under `reports/`
 
 ## Canonical Files

@@ -4,8 +4,8 @@ Each role returns its report as structured JSON as its final response. The runti
 
 ## Sandbox Modes
 
-- **planner** and **implementer**: `workspace-write` -- they need to modify files in the target repo.
-- **verifier**: `read-only` -- it must not alter the commit under review.
+- **planner** and **implementer**: `workspace-write` when the environment supports bwrap, otherwise `danger-full-access`.
+- **verifier**: `read-only` under `workspace_write`, otherwise `danger-full-access` when the environment cannot support the restricted sandbox.
 
 ## Planner
 
@@ -35,6 +35,7 @@ The implementer owns:
 
 - one task attempt at a time,
 - one trial commit at a time,
+- one isolated task worktree/branch when parallel execution is active,
 - one implementer report for that attempt.
 
 The implementer may:
@@ -42,6 +43,7 @@ The implementer may:
 - edit product code for the selected task,
 - run local checks,
 - create a single trial commit,
+- work inside its assigned task worktree,
 - propose new tasks in its report.
 
 The implementer must not:
@@ -73,7 +75,7 @@ The verifier must not:
 
 - mutate `tasks.json`,
 - write product code,
-- silently change the commit under review.
+- silently change the commit under review or the main branch.
 
 ## Runtime
 
@@ -82,8 +84,9 @@ The runtime owns:
 - launch/runtime artifacts,
 - process management,
 - verdict application,
+- task worktree/branch lifecycle,
 - state/events/lessons updates.
 
-The runtime may update task execution-state fields after implementer/verifier turns, but it must not change task topology. It must stay deterministic and artifact-driven.
+The runtime may update task execution-state fields after implementer/verifier turns, cherry-pick accepted commits onto main, and reset/remove task worktrees, but it must not change task topology. It must stay deterministic and artifact-driven.
 
 The runtime communicates with Codex exclusively through the app-server JSON-RPC protocol. It selects the sandbox mode per role (see above) and enforces report schemas via `outputSchema` on each `turn/start` request.

@@ -11,5 +11,4 @@ The verifier:
    - criteria results
    - optional proposed follow-up tasks
 
-The verifier does not modify `tasks.json` and does not apply the revert itself.
-
+The verifier does not modify `tasks.json`, does not cherry-pick onto main, and does not apply the retry/reset itself.

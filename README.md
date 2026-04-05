@@ -46,13 +46,15 @@ The runtime launches in the background and works through the tasks autonomously.
 flowchart TD
     A[Goal] --> B[Planner]
     B --> C[Task list]
-    C --> D[Implementer]
-    D --> E[Trial commit]
+    C --> D[Implementer worktree]
+    D --> E[Task-local commit]
     E --> F[Verifier]
     F --> G{Verdict}
-    G -->|accept| C
-    G -->|revert| D
-    C -->|empty| H[Done]
+    G -->|accept| H[Cherry-pick onto main]
+    H --> C
+    G -->|revert| I[Reset task worktree]
+    I --> D
+    C -->|empty| J[Done]
 ```
 
 Each role runs as a separate Codex turn with an isolated context window and returns a structured report via `outputSchema` (schemas in `schemas/*.schema.json`).
@@ -81,6 +83,8 @@ The harness writes these files into the target repo:
 | `harness-servers.json` | App-server PIDs for crash recovery |
 | `harness-lessons.md` | Cross-run strategic memory |
 | `reports/*.json` | Role handoff reports |
+
+During parallel implementation the runtime also creates temporary task worktrees under `.harness-worktrees/` inside the target repo. Accepted task worktrees are cleaned up after integration.
 
 ## Tests
 

@@ -99,7 +99,7 @@ The background runtime loops autonomously:
 2. Builds the role prompt.
 3. Sends a turn to Codex via the app-server JSON-RPC protocol.
 4. Receives the structured report via `outputSchema`.
-5. Applies supervisor transitions (accept/revert/replan/dispatch next role).
+5. Applies supervisor transitions (accept/cherry-pick, retry/reset, replan, dispatch next role).
 6. Repeats until all tasks are done or it reaches `needs_human`.
 
 If `tasks.json` already has `ready` tasks, the runtime skips the initial planner turn and goes directly to the implementer.
@@ -137,7 +137,7 @@ Confirm to the user that the runtime was stopped.
 ## Roles
 
 - `planner`: user-facing before launch; owns `plan.md` and `tasks.json`; may add, split, reprioritize, and close tasks.
-- `implementer`: writes product code for one ready task and creates a trial commit.
+- `implementer`: writes product code for one ready task in its task worktree and creates a trial commit.
 - `verifier`: evaluates the exact trial commit and returns `accept` or `revert`.
 - `runtime`: not an LLM role; communicates with Codex via the app-server JSON-RPC protocol, applies verifier verdicts, updates artifacts, and manages resume/status/stop. When the planner produces multiple independent tasks, the runtime runs implementers in parallel in isolated task worktrees and cherry-picks accepted commits back onto the main branch.
 
@@ -163,7 +163,7 @@ Confirm to the user that the runtime was stopped.
 
 1. The planner is the only role allowed to change task topology in `tasks.json` (add/split/reprioritize/close tasks).
 2. The implementer is the only role allowed to write product code.
-3. The verifier must evaluate the exact trial commit, not a mutable working tree.
+3. The verifier must evaluate the exact trial commit, not a mutable working tree or the post-integration main branch.
 4. The verifier returns only `accept`, `revert`, or `needs_human`.
 5. The runtime may update execution-state fields for the current task (`in_progress`, `in_review`, `done`, `ready`, `blocked`) when applying verifier verdicts, but it does not invent product work or change DAG topology.
 6. All role-to-role communication happens through artifacts in the target repo.

@@ -23,7 +23,7 @@ The runtime:
 4. Chooses the next role from the current artifact state.
 5. Builds the role prompt.
 6. Sends a `turn/start` request to the app-server for that role (with the appropriate sandbox mode and `outputSchema`).
-7. Applies verifier verdicts (`accept` or `revert`).
+7. Applies verifier verdicts (`accept` or `revert`), including cherry-picking accepted task commits onto main and resetting rejected task worktrees for retry.
 8. Updates `harness-runtime.json`, `harness-state.json`, `harness-events.tsv`, and `harness-lessons.md`.
 9. Transitions to `needs_human` if progress is unsafe or inconsistent.
 

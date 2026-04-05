@@ -204,7 +204,7 @@ def build_verifier_prompt(
     implementer_report_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
     try:
         implementer_report = read_json(implementer_report_path)
-    except Exception:
+    except (HarnessError, FileNotFoundError):
         implementer_report = {}
     files_changed = [str(item) for item in implementer_report.get("files_changed") or []]
     checks_run = [str(item) for item in implementer_report.get("checks_run") or []]
