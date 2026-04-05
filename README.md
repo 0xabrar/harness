@@ -67,6 +67,17 @@ Each role runs as a separate Codex turn with an isolated context window and retu
 
 The runtime itself is not an LLM — it's a Python script that reads reports, applies verdicts, and decides which role runs next. If multiple independent tasks are ready, implementers run in parallel in isolated Git worktrees. Accepted task commits are cherry-picked back onto the main branch so the final history stays linear. If a task is rejected, the task worktree is reset for retry and main stays untouched.
 
+## Expected `needs_human`
+
+`needs_human` is still expected in some cases. The main ones are:
+
+- acceptance criteria are ambiguous or under-specified
+- the environment blocks a verification command
+- an accepted task commit cannot be cherry-picked cleanly onto main
+- the repo is in an inconsistent state the runtime should not repair automatically
+
+In those cases the harness should stop cleanly with enough state and reports for a human to decide the next step.
+
 ## What It Writes
 
 The harness writes these files into the target repo:

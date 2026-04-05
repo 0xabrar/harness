@@ -612,6 +612,126 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             self.assertEqual(runtime_payload["status"], "terminal")
             self.assertEqual(runtime_payload["terminal_reason"], "all_tasks_done")
 
+    def test_cherry_pick_conflict_escalates_runtime_to_needs_human(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = default_paths(repo)
+
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Run one task with a cherry-pick conflict",
+                    prompt_text=None,
+                    config={
+                        "goal": "Run one task with a cherry-pick conflict",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 2,
+                    },
+                ),
+            )
+            initialize_run(
+                repo=repo,
+                goal="Run one task with a cherry-pick conflict",
+                scope=".",
+                session_mode="background",
+                execution_policy="danger_full_access",
+                max_task_attempts=2,
+                force=True,
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Run one task with a cherry-pick conflict",
+                    "planner_revision": 1,
+                    "tasks": [
+                        {
+                            "id": "T-001",
+                            "title": "Task T-001",
+                            "description": "Conflicting task",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        }
+                    ],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+
+            def fake_run_role_turn(*, role: str, task_id: str, **kwargs: Any) -> dict[str, Any]:
+                if role == "implementer":
+                    return {
+                        "report": {
+                            "role": "implementer",
+                            "task_id": task_id,
+                            "attempt": 1,
+                            "commit": "commit-T-001",
+                            "summary": "implemented",
+                            "files_changed": ["T-001.txt"],
+                            "checks_run": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": "thread-T-001",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+                return {
+                    "report": {
+                        "role": "verifier",
+                        "task_id": task_id,
+                        "attempt": 1,
+                        "commit": "commit-T-001",
+                        "verdict": "accept",
+                        "summary": "verified",
+                        "findings": [],
+                        "criteria_results": [],
+                        "proposed_tasks": [],
+                    },
+                    "thread_id": "verify-T-001",
+                    "turn_result": {},
+                    "parse_error": None,
+                }
+
+            class FakeServerManager:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+
+                def kill_orphans(self) -> None:
+                    return None
+
+                def shutdown(self) -> None:
+                    return None
+
+            def fake_prepare_task_worktree(*, task_id: str, **kwargs: Any) -> dict[str, str]:
+                worktree = repo / f"worktree-{task_id}"
+                worktree.mkdir(exist_ok=True)
+                return {
+                    "branch_name": f"branch-{task_id}",
+                    "worktree_path": str(worktree),
+                    "base_commit": "base-commit",
+                }
+
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
+                "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
+            ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
+                "harness_supervisor_status.cherry_pick_commit", side_effect=HarnessError("simulated cherry-pick conflict")
+            ), patch("harness_runtime_ops.time.sleep", return_value=None):
+                exit_code = run_runtime(args)
+
+            self.assertEqual(exit_code, 2)
+            runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
+            self.assertEqual(runtime_payload["status"], "needs_human")
+            self.assertIn("simulated cherry-pick conflict", runtime_payload["terminal_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ from harness_artifacts import load_tasks, report_path_for_role, write_tasks  # n
 from harness_artifacts import read_json  # noqa: E402
 from harness_init_run import initialize_run  # noqa: E402
 from harness_supervisor_status import evaluate_supervisor_status  # noqa: E402
+from harness_task_worktree import prepare_task_worktree  # noqa: E402
 
 
 def git(repo: Path, *args: str) -> str:
@@ -285,6 +286,86 @@ class HarnessFlowTests(unittest.TestCase):
             self.assertEqual({}, state["state"]["active_tasks"])
             tasks = read_json(repo / "tasks.json")
             self.assertEqual("blocked", tasks["tasks"][0]["status"])
+
+    def test_worktree_needs_human_keeps_main_branch_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = setup_repo(Path(tmp))
+            initialize_run(
+                repo=repo,
+                goal="Build harness",
+                scope="repo",
+                session_mode="background",
+                execution_policy="danger_full_access",
+            )
+            seed_ready_task(repo)
+
+            reports = type("Paths", (), {"reports": repo / "reports"})()
+            planner_report = report_path_for_role(reports, "planner", planner_revision=1)
+            write_json(
+                planner_report,
+                {
+                    "role": "planner",
+                    "revision": 1,
+                    "summary": "Initial task graph ready.",
+                    "task_changes": {"added": ["T-001"], "updated": [], "closed": []},
+                    "planner_requested_reason": "initial_plan",
+                },
+            )
+            evaluate_supervisor_status(repo=repo)
+
+            workspace = prepare_task_worktree(repo=repo, task_id="T-001")
+            worktree = Path(workspace["worktree_path"])
+            (worktree / "app.txt").write_text("base\nworktree\n", encoding="utf-8")
+            git(worktree, "add", "app.txt")
+            git(worktree, "commit", "-m", "implement in worktree")
+            trial_commit = git(worktree, "rev-parse", "HEAD")
+            main_head_before = git(repo, "rev-parse", "HEAD")
+
+            state = read_json(repo / "harness-state.json")
+            state["state"]["active_tasks"]["T-001"].update(workspace)
+            write_json(repo / "harness-state.json", state)
+
+            impl_report = report_path_for_role(reports, "implementer", task_id="T-001", attempt=1)
+            write_json(
+                impl_report,
+                {
+                    "role": "implementer",
+                    "task_id": "T-001",
+                    "attempt": 1,
+                    "commit": trial_commit,
+                    "summary": "Implemented the task in an isolated worktree.",
+                    "files_changed": ["app.txt"],
+                    "checks_run": [],
+                    "proposed_tasks": [],
+                },
+            )
+            evaluate_supervisor_status(repo=repo)
+
+            verdict_report = report_path_for_role(reports, "verifier", task_id="T-001", attempt=1)
+            write_json(
+                verdict_report,
+                {
+                    "role": "verifier",
+                    "task_id": "T-001",
+                    "attempt": 1,
+                    "commit": trial_commit,
+                    "verdict": "needs_human",
+                    "summary": "Acceptance criteria are ambiguous.",
+                    "findings": [],
+                    "criteria_results": [],
+                    "proposed_tasks": [],
+                },
+            )
+            outcome = evaluate_supervisor_status(repo=repo)
+            self.assertEqual(outcome["decision"], "needs_human")
+
+            state = read_json(repo / "harness-state.json")
+            self.assertEqual(1, state["state"]["needs_human"])
+            self.assertEqual({}, state["state"]["active_tasks"])
+            tasks = read_json(repo / "tasks.json")
+            self.assertEqual("blocked", tasks["tasks"][0]["status"])
+            self.assertEqual(main_head_before, git(repo, "rev-parse", "HEAD"))
+            self.assertIn(str(worktree), git(repo, "worktree", "list"))
 
     def test_report_alias_fields_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
