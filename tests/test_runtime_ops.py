@@ -732,6 +732,204 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             self.assertEqual(runtime_payload["status"], "needs_human")
             self.assertIn("simulated cherry-pick conflict", runtime_payload["terminal_reason"])
 
+    def test_complex_dag_with_parallel_fan_in_and_retry_reaches_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = default_paths(repo)
+
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Run a complex DAG",
+                    prompt_text=None,
+                    config={
+                        "goal": "Run a complex DAG",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 3,
+                    },
+                ),
+            )
+            initialize_run(
+                repo=repo,
+                goal="Run a complex DAG",
+                scope=".",
+                session_mode="background",
+                execution_policy="danger_full_access",
+                max_task_attempts=3,
+                force=True,
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Run a complex DAG",
+                    "planner_revision": 1,
+                    "tasks": [
+                        {
+                            "id": "T-001",
+                            "title": "Task T-001",
+                            "description": "Parallel leaf one",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        },
+                        {
+                            "id": "T-002",
+                            "title": "Task T-002",
+                            "description": "Parallel leaf two with retry",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        },
+                        {
+                            "id": "T-003",
+                            "title": "Task T-003",
+                            "description": "Parallel leaf three",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        },
+                        {
+                            "id": "T-004",
+                            "title": "Task T-004",
+                            "description": "Fan-in task",
+                            "acceptance_criteria": ["done"],
+                            "status": "pending",
+                            "priority": 2,
+                            "dependencies": ["T-001", "T-002"],
+                            "attempts": 0,
+                        },
+                        {
+                            "id": "T-005",
+                            "title": "Task T-005",
+                            "description": "Final fan-in task",
+                            "acceptance_criteria": ["done"],
+                            "status": "pending",
+                            "priority": 3,
+                            "dependencies": ["T-003", "T-004"],
+                            "attempts": 0,
+                        },
+                    ],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+
+            call_order: list[tuple[str, str]] = []
+            implementer_counts: dict[str, int] = {}
+            verifier_counts: dict[str, int] = {}
+
+            def fake_run_role_turn(*, role: str, task_id: str, **kwargs: Any) -> dict[str, Any]:
+                call_order.append((role, task_id))
+                if role == "implementer":
+                    attempt = implementer_counts.get(task_id, 0) + 1
+                    implementer_counts[task_id] = attempt
+                    return {
+                        "report": {
+                            "role": "implementer",
+                            "task_id": task_id,
+                            "attempt": attempt,
+                            "commit": f"commit-{task_id}-a{attempt}",
+                            "summary": f"implemented {task_id} attempt {attempt}",
+                            "files_changed": [f"{task_id}.txt"],
+                            "checks_run": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": f"thread-{task_id}",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+
+                attempt = verifier_counts.get(task_id, 0) + 1
+                verifier_counts[task_id] = attempt
+                verdict = "accept"
+                summary = f"verified {task_id}"
+                if task_id == "T-002" and attempt == 1:
+                    verdict = "revert"
+                    summary = "retry this branch once"
+                return {
+                    "report": {
+                        "role": "verifier",
+                        "task_id": task_id,
+                        "attempt": attempt,
+                        "commit": f"commit-{task_id}-a{attempt}",
+                        "verdict": verdict,
+                        "summary": summary,
+                        "findings": [],
+                        "criteria_results": [],
+                        "proposed_tasks": [],
+                    },
+                    "thread_id": f"verify-{task_id}",
+                    "turn_result": {},
+                    "parse_error": None,
+                }
+
+            class FakeServerManager:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+
+                def kill_orphans(self) -> None:
+                    return None
+
+                def shutdown(self) -> None:
+                    return None
+
+            def fake_prepare_task_worktree(*, task_id: str, **kwargs: Any) -> dict[str, str]:
+                worktree = repo / f"worktree-{task_id}"
+                worktree.mkdir(exist_ok=True)
+                return {
+                    "branch_name": f"branch-{task_id}",
+                    "worktree_path": str(worktree),
+                    "base_commit": "base-commit",
+                }
+
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
+                "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
+            ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
+                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+            ), patch("harness_supervisor_status.git_head", return_value="base-commit-2"), patch(
+                "harness_supervisor_status.reset_task_worktree", return_value=None
+            ), patch(
+                "harness_supervisor_status.remove_task_worktree", return_value=None
+            ), patch("harness_runtime_ops.time.sleep", return_value=None):
+                exit_code = run_runtime(args)
+
+            self.assertEqual(exit_code, 0)
+            tasks_payload = json.loads(paths.tasks.read_text(encoding="utf-8"))
+            index = {task["id"]: task for task in tasks_payload["tasks"]}
+            self.assertTrue(all(task["status"] == "done" for task in index.values()))
+            self.assertEqual(index["T-002"]["attempts"], 2)
+            self.assertEqual(index["T-002"]["last_verdict"], "accept")
+            self.assertEqual(index["T-004"]["status"], "done")
+            self.assertEqual(index["T-005"]["status"], "done")
+
+            state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+            self.assertEqual(state_payload["state"]["accepts"], 5)
+            self.assertEqual(state_payload["state"]["reverts"], 1)
+            self.assertEqual(state_payload["state"]["active_tasks"], {})
+            self.assertTrue(state_payload["state"]["completed"])
+
+            runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
+            self.assertEqual(runtime_payload["status"], "terminal")
+            self.assertEqual(runtime_payload["terminal_reason"], "all_tasks_done")
+
+            self.assertIn(("implementer", "T-004"), call_order)
+            self.assertIn(("implementer", "T-005"), call_order)
+            self.assertEqual(implementer_counts["T-002"], 2)
+            self.assertEqual(verifier_counts["T-002"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
