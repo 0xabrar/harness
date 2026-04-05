@@ -551,8 +551,9 @@ class CodexAppServer:
 class ManagedServer:
     """Wraps a :class:`CodexAppServer` with task-assignment tracking."""
 
-    def __init__(self, server: CodexAppServer) -> None:
+    def __init__(self, server: CodexAppServer, *, cwd: str) -> None:
         self.server = server
+        self.cwd = cwd
         self.current_task: str | None = None
         self.thread_history: dict[str, str] = {}  # task_id -> thread_id
         self.last_used: float = time.monotonic()
@@ -585,10 +586,12 @@ class ServerManager:
         self,
         *,
         cwd: str | None = None,
+        state_dir: str | None = None,
         env: dict[str, str] | None = None,
         codex_bin: str = "codex",
     ) -> None:
-        self._cwd = cwd or os.getcwd()
+        self._default_cwd = cwd or os.getcwd()
+        self._state_dir = state_dir or self._default_cwd
         self._env = env
         self._codex_bin = codex_bin
         self._servers: list[ManagedServer] = []
@@ -602,19 +605,22 @@ class ServerManager:
 
     # -- public API --------------------------------------------------------
 
-    def acquire(self, task_id: str, *, resume_thread_id: str | None = None) -> ManagedServer:
+    def acquire(self, task_id: str, *, resume_thread_id: str | None = None, cwd: str | None = None) -> ManagedServer:
         """Find an idle server or spawn a new one, assign *task_id*, and return it.
 
         When *resume_thread_id* is provided, prefer an idle server whose
         ``thread_history`` already contains that thread ID so the resume
         request reaches the process that created the thread.
         """
+        target_cwd = cwd or self._default_cwd
         with self._lock:
             self._reap_idle()
 
             # If resuming, prefer the server that owns the thread
             if resume_thread_id:
                 for ms in self._servers:
+                    if ms.cwd != target_cwd:
+                        continue
                     if ms.idle and ms.alive and resume_thread_id in ms.thread_history.values():
                         ms.assign(task_id)
                         self._persist_pids()
@@ -622,15 +628,17 @@ class ServerManager:
 
             # Fall back to any idle server
             for ms in self._servers:
+                if ms.cwd != target_cwd:
+                    continue
                 if ms.idle and ms.alive:
                     ms.assign(task_id)
                     self._persist_pids()
                     return ms
 
             # Spawn a new one
-            server = CodexAppServer(cwd=self._cwd, env=self._env, codex_bin=self._codex_bin)
+            server = CodexAppServer(cwd=target_cwd, env=self._env, codex_bin=self._codex_bin)
             server.start()
-            ms = ManagedServer(server)
+            ms = ManagedServer(server, cwd=target_cwd)
             ms.assign(task_id)
             self._servers.append(ms)
             self._persist_pids()
@@ -653,7 +661,7 @@ class ServerManager:
                 except Exception:
                     pass
             self._servers.clear()
-            state_path = os.path.join(self._cwd, SERVERS_STATE_FILENAME)
+            state_path = os.path.join(self._state_dir, SERVERS_STATE_FILENAME)
             try:
                 os.remove(state_path)
             except FileNotFoundError:
@@ -661,7 +669,7 @@ class ServerManager:
 
     def kill_orphans(self) -> None:
         """Read ``harness-servers.json`` from a previous crash and kill listed PIDs."""
-        state_path = os.path.join(self._cwd, SERVERS_STATE_FILENAME)
+        state_path = os.path.join(self._state_dir, SERVERS_STATE_FILENAME)
         try:
             with open(state_path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -707,7 +715,7 @@ class ServerManager:
     def _persist_pids(self) -> None:
         """Write current server PIDs to ``harness-servers.json``."""
         pids = [ms.server.pid for ms in self._servers if ms.server.pid is not None]
-        state_path = os.path.join(self._cwd, SERVERS_STATE_FILENAME)
+        state_path = os.path.join(self._state_dir, SERVERS_STATE_FILENAME)
         try:
             with open(state_path, "w", encoding="utf-8") as fh:
                 json.dump({"pids": pids}, fh)

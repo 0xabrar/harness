@@ -48,7 +48,7 @@ The runtime manages Codex app-server processes through a `ServerManager`:
 
 ## Parallel Execution
 
-When the planner produces multiple independent tasks (i.e. tasks whose dependencies are all satisfied), the runtime runs implementer turns concurrently -- one app-server turn per task. Results are collected and each task proceeds independently to verification.
+When the planner produces multiple independent tasks (i.e. tasks whose dependencies are all satisfied), the runtime runs implementer turns concurrently in isolated Git worktrees -- one task branch and one app-server turn per task. Accepted task commits are cherry-picked onto the main branch; rejected task commits stay in the task worktree and are reset for retry.
 
 ## Background Model
 

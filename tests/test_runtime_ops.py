@@ -1,14 +1,18 @@
 """Unit tests for harness_runtime_ops: run_role_turn, sandbox_for_role, and dead-code removal."""
 from __future__ import annotations
 
+import argparse
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from harness_app_server import AppServerError
-from harness_artifacts import HarnessError
-from harness_runtime_ops import run_role_turn, sandbox_for_role
+from harness_artifacts import HarnessError, build_launch_manifest, default_paths, write_json_atomic, write_tasks
+from harness_init_run import initialize_run
+from harness_runtime_ops import run_role_turn, run_runtime, sandbox_for_role
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +467,150 @@ class TestThreadResume(unittest.TestCase):
             last_verifier_feedback = str(report.get("summary") or "")
 
         self.assertEqual(last_verifier_feedback, "")
+
+
+class TestRunRuntimeScheduling(unittest.TestCase):
+    def test_multiple_ready_tasks_run_one_implementer_turn_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = default_paths(repo)
+
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Run two ready tasks safely",
+                    prompt_text=None,
+                    config={
+                        "goal": "Run two ready tasks safely",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 2,
+                    },
+                ),
+            )
+            initialize_run(
+                repo=repo,
+                goal="Run two ready tasks safely",
+                scope=".",
+                session_mode="background",
+                execution_policy="danger_full_access",
+                max_task_attempts=2,
+                force=True,
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Run two ready tasks safely",
+                    "planner_revision": 1,
+                    "tasks": [
+                        {
+                            "id": "T-001",
+                            "title": "Task T-001",
+                            "description": "First task",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        },
+                        {
+                            "id": "T-002",
+                            "title": "Task T-002",
+                            "description": "Second task",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        },
+                    ],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+
+            call_order: list[tuple[str, str]] = []
+
+            def fake_run_role_turn(*, role: str, task_id: str, **kwargs: Any) -> dict[str, Any]:
+                call_order.append((role, task_id))
+                if role == "implementer":
+                    return {
+                        "report": {
+                            "role": "implementer",
+                            "task_id": task_id,
+                            "attempt": 1,
+                            "commit": f"commit-{task_id}",
+                            "summary": f"implemented {task_id}",
+                            "files_changed": [f"{task_id}.txt"],
+                            "checks_run": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": f"thread-{task_id}",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+                return {
+                    "report": {
+                        "role": "verifier",
+                        "task_id": task_id,
+                        "attempt": 1,
+                        "commit": f"commit-{task_id}",
+                        "verdict": "accept",
+                        "summary": f"verified {task_id}",
+                        "findings": [],
+                        "criteria_results": [],
+                        "proposed_tasks": [],
+                    },
+                    "thread_id": f"verify-{task_id}",
+                    "turn_result": {},
+                    "parse_error": None,
+                }
+
+            class FakeServerManager:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+
+                def kill_orphans(self) -> None:
+                    return None
+
+                def shutdown(self) -> None:
+                    return None
+
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            def fake_prepare_task_worktree(*, task_id: str, **kwargs: Any) -> dict[str, str]:
+                worktree = repo / f"worktree-{task_id}"
+                worktree.mkdir(exist_ok=True)
+                return {
+                    "branch_name": f"branch-{task_id}",
+                    "worktree_path": str(worktree),
+                    "base_commit": "base-commit",
+                }
+
+            with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
+                "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
+            ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
+                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+            ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
+                "harness_runtime_ops.time.sleep", return_value=None
+            ):
+                exit_code = run_runtime(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual({call_order[0], call_order[1]}, {("implementer", "T-001"), ("implementer", "T-002")})
+            self.assertEqual(call_order[2:], [("verifier", "T-001"), ("verifier", "T-002")])
+
+            tasks_payload = json.loads(paths.tasks.read_text(encoding="utf-8"))
+            self.assertEqual([task["status"] for task in tasks_payload["tasks"]], ["done", "done"])
+            state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+            self.assertEqual(state_payload["state"]["active_tasks"], {})
+            runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
+            self.assertEqual(runtime_payload["status"], "terminal")
+            self.assertEqual(runtime_payload["terminal_reason"], "all_tasks_done")
 
 
 if __name__ == "__main__":

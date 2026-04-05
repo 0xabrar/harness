@@ -24,6 +24,7 @@ from harness_artifacts import (
     write_tasks,
 )
 from harness_lessons import append_lesson
+from harness_task_worktree import cherry_pick_commit, git_head, remove_task_worktree, reset_task_worktree
 
 
 def _active_tasks(state_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -143,6 +144,9 @@ def planner_report_state(paths, state_payload: dict[str, Any], tasks_payload: di
             "trial_commit": "",
             "thread_id": str(active.get(str(task["id"]), {}).get("thread_id") or ""),
             "verifier_feedback": str(active.get(str(task["id"]), {}).get("verifier_feedback") or ""),
+            "branch_name": str(active.get(str(task["id"]), {}).get("branch_name") or ""),
+            "worktree_path": str(active.get(str(task["id"]), {}).get("worktree_path") or ""),
+            "base_commit": str(active.get(str(task["id"]), {}).get("base_commit") or ""),
         }
     return {"decision": "relaunch", "reason": "dispatch_implementer", "report": report, "tasks": tasks_payload}
 
@@ -190,6 +194,9 @@ def implementer_report_state(paths, state_payload: dict[str, Any], tasks_payload
         "trial_commit": commit,
         "thread_id": str(record.get("thread_id") or ""),
         "verifier_feedback": "",
+        "branch_name": str(record.get("branch_name") or ""),
+        "worktree_path": str(record.get("worktree_path") or ""),
+        "base_commit": str(record.get("base_commit") or ""),
     }
 
     state_payload["state"]["implementer_runs"] += 1
@@ -243,11 +250,21 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
     state_payload["state"]["last_status"] = verdict
 
     if verdict == "accept":
+        integrated_commit = commit
+        if str(record.get("worktree_path") or ""):
+            integrated_commit = cherry_pick_commit(repo=paths.repo, commit=commit)
         task["status"] = "done"
         task["last_verdict"] = "accept"
+        task["last_integrated_commit"] = integrated_commit
         state_payload["state"]["accepts"] += 1
-        state_payload["state"]["accepted_commit"] = commit
+        state_payload["state"]["accepted_commit"] = integrated_commit
         active.pop(task_id, None)
+        if str(record.get("worktree_path") or "") or str(record.get("branch_name") or ""):
+            remove_task_worktree(
+                repo=paths.repo,
+                branch_name=str(record.get("branch_name") or ""),
+                worktree_path=str(record.get("worktree_path") or ""),
+            )
         append_lesson(
             path=paths.lessons,
             title=f"Accepted task {task_id}",
@@ -283,7 +300,16 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
         active.pop(task_id, None)
         return {"decision": "needs_human", "reason": "verifier_escalated", "report": report, "tasks": tasks_payload}
 
-    revert_trial_commit(paths.repo, commit)
+    if str(record.get("worktree_path") or ""):
+        next_base = git_head(paths.repo)
+        reset_task_worktree(
+            repo=paths.repo,
+            worktree_path=str(record.get("worktree_path") or ""),
+            base_commit=next_base,
+        )
+        record["base_commit"] = next_base
+    else:
+        revert_trial_commit(paths.repo, commit)
     state_payload["state"]["reverts"] += 1
     task["last_verdict"] = "revert"
     append_lesson(
@@ -330,6 +356,9 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
         "trial_commit": "",
         "thread_id": str(record.get("thread_id") or ""),
         "verifier_feedback": summary,
+        "branch_name": str(record.get("branch_name") or ""),
+        "worktree_path": str(record.get("worktree_path") or ""),
+        "base_commit": str(record.get("base_commit") or ""),
     }
     return {"decision": "relaunch", "reason": "retry_task", "report": report, "tasks": tasks_payload}
 

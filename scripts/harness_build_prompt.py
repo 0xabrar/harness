@@ -72,7 +72,7 @@ Each task should be small enough for one implementer turn — roughly one file o
 
 Every task must have explicit, testable acceptance criteria. "Works correctly" is not a criterion. "greet('World') returns 'Hello, World!'" is.
 
-Mark tasks with no mutual dependencies as independent so the runtime can parallelize them.
+Mark tasks with no mutual dependencies as independent so the runtime can parallelize them in isolated task worktrees.
 </task_design>
 
 <constraints>

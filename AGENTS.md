@@ -67,7 +67,7 @@ When a turn returns empty `final_message`, check the `error` field in the turn r
 ### Concurrency
 
 - `ServerManager` is thread-safe (uses `threading.Lock`).
-- Each parallel implementer gets its own `ManagedServer` from the pool.
+- Parallel implementers must use isolated task worktrees; sharing one Git worktree across multiple implementers is unsafe even when files do not overlap.
 - `ManagedServer.thread_history` maps task IDs to thread IDs, enabling thread resume for retries. This is per-server — if the server that hosted a thread dies, the thread is gone and a fresh one is started.
 
 ## Supervisor and State

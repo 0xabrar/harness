@@ -63,7 +63,7 @@ Each role runs as a separate Codex turn with an isolated context window and retu
 | **Implementer** | Works one task, makes code changes, creates a trial commit | Cannot edit `tasks.json` |
 | **Verifier** | Evaluates the trial commit against acceptance criteria | Cannot modify code; returns `accept`, `revert`, or `needs_human` |
 
-The runtime itself is not an LLM — it's a Python script that reads reports, applies verdicts (keep or revert), and decides which role runs next. If multiple independent tasks are ready, implementers run in parallel. If a task is reverted, the implementer retries in its existing conversation thread with the verifier's feedback.
+The runtime itself is not an LLM — it's a Python script that reads reports, applies verdicts, and decides which role runs next. If multiple independent tasks are ready, implementers run in parallel in isolated Git worktrees. Accepted task commits are cherry-picked back onto the main branch so the final history stays linear. If a task is rejected, the task worktree is reset for retry and main stays untouched.
 
 ## What It Writes
 

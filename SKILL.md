@@ -139,7 +139,7 @@ Confirm to the user that the runtime was stopped.
 - `planner`: user-facing before launch; owns `plan.md` and `tasks.json`; may add, split, reprioritize, and close tasks.
 - `implementer`: writes product code for one ready task and creates a trial commit.
 - `verifier`: evaluates the exact trial commit and returns `accept` or `revert`.
-- `runtime`: not an LLM role; communicates with Codex via the app-server JSON-RPC protocol, applies verifier verdicts, updates artifacts, and manages resume/status/stop. When the planner produces multiple independent tasks, the runtime runs implementers concurrently.
+- `runtime`: not an LLM role; communicates with Codex via the app-server JSON-RPC protocol, applies verifier verdicts, updates artifacts, and manages resume/status/stop. When the planner produces multiple independent tasks, the runtime runs implementers in parallel in isolated task worktrees and cherry-picks accepted commits back onto the main branch.
 
 ## When Activated
 

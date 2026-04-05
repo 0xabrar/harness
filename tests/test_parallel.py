@@ -152,8 +152,14 @@ class TestBuildImplementerPromptForTask(unittest.TestCase):
 
 
 class TestRunParallelImplementers(unittest.TestCase):
+    @patch("harness_runtime_ops.prepare_task_worktree")
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
-    def test_runs_multiple_tasks_concurrently(self, _mock_schema: Any) -> None:
+    def test_runs_multiple_tasks_concurrently(self, _mock_schema: Any, mock_prepare: Any) -> None:
+        mock_prepare.side_effect = lambda **kwargs: {
+            "branch_name": f"branch-{kwargs['task_id']}",
+            "worktree_path": f"/tmp/{kwargs['task_id']}",
+            "base_commit": "base-commit",
+        }
         manager = _mock_manager()
         tasks = [_make_task("T-001"), _make_task("T-002")]
         results, errors = _run_parallel_implementers(
@@ -166,8 +172,14 @@ class TestRunParallelImplementers(unittest.TestCase):
         self.assertIn("T-001", results)
         self.assertIn("T-002", results)
 
+    @patch("harness_runtime_ops.prepare_task_worktree")
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
-    def test_captures_errors_per_task(self, _mock_schema: Any) -> None:
+    def test_captures_errors_per_task(self, _mock_schema: Any, mock_prepare: Any) -> None:
+        mock_prepare.side_effect = lambda **kwargs: {
+            "branch_name": f"branch-{kwargs['task_id']}",
+            "worktree_path": f"/tmp/{kwargs['task_id']}",
+            "base_commit": "base-commit",
+        }
         manager = MagicMock()
 
         def _acquire(key: str, **kwargs: Any) -> MagicMock:
@@ -198,8 +210,14 @@ class TestRunParallelImplementers(unittest.TestCase):
         self.assertIn("T-002", errors)
         self.assertIn("boom", errors["T-002"])
 
+    @patch("harness_runtime_ops.prepare_task_worktree")
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
-    def test_uses_separate_threads(self, _mock_schema: Any) -> None:
+    def test_uses_separate_threads(self, _mock_schema: Any, mock_prepare: Any) -> None:
+        mock_prepare.side_effect = lambda **kwargs: {
+            "branch_name": f"branch-{kwargs['task_id']}",
+            "worktree_path": f"/tmp/{kwargs['task_id']}",
+            "base_commit": "base-commit",
+        }
         manager = _mock_manager()
         thread_ids: list[int | None] = []
 
@@ -220,7 +238,7 @@ class TestRunParallelImplementers(unittest.TestCase):
                 runtime={},
             )
         self.assertEqual(len(results) + len(errors), 2)
-        self.assertGreaterEqual(len(set(thread_ids)), 1)
+        self.assertEqual(len(thread_ids), 2)
 
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
     def test_empty_tasks_returns_empty(self, _mock_schema: Any) -> None:
@@ -234,8 +252,14 @@ class TestRunParallelImplementers(unittest.TestCase):
         self.assertEqual(results, {})
         self.assertEqual(errors, {})
 
+    @patch("harness_runtime_ops.prepare_task_worktree")
     @patch("harness_runtime_ops.load_schema", return_value={"type": "object"})
-    def test_uses_saved_attempt_and_feedback_for_retry(self, _mock_schema: Any) -> None:
+    def test_uses_saved_attempt_and_feedback_for_retry(self, _mock_schema: Any, mock_prepare: Any) -> None:
+        mock_prepare.return_value = {
+            "branch_name": "branch-T-001",
+            "worktree_path": "/tmp/T-001",
+            "base_commit": "base-commit",
+        }
         manager = _mock_manager()
         captured_prompt: dict[str, str] = {}
 

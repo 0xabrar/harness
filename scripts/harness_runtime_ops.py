@@ -40,6 +40,7 @@ from harness_report_parser import parse_structured_output
 from harness_runtime_common import ensure_runtime_not_running, persist_runtime
 from harness_schemas import load_schema
 from harness_supervisor_status import evaluate_supervisor_status
+from harness_task_worktree import prepare_task_worktree
 
 
 _POLICY_SANDBOX: dict[str, dict[str, str]] = {
@@ -105,6 +106,13 @@ def _run_parallel_implementers(
         task_id = str(task["id"])
         try:
             record = (task_states or {}).get(task_id, {})
+            workspace = prepare_task_worktree(
+                repo=paths.repo,
+                task_id=task_id,
+                branch_name=str(record.get("branch_name") or ""),
+                worktree_path=str(record.get("worktree_path") or ""),
+                base_commit=str(record.get("base_commit") or ""),
+            )
             attempt = int(record.get("attempt") or (int(task.get("attempts", 0)) + 1))
             prompt = build_implementer_prompt_for_task(paths, task, attempt=attempt)
             feedback = str(record.get("verifier_feedback") or "")
@@ -120,10 +128,11 @@ def _run_parallel_implementers(
                 role="implementer",
                 task_id=task_id,
                 prompt=prompt,
-                repo=paths.repo,
+                repo=Path(workspace["worktree_path"]),
                 sandbox=sandbox_for_role("implementer", execution_policy),
                 resume_thread_id=str(record.get("thread_id") or "") or None,
             )
+            turn["workspace"] = workspace
             results[task_id] = turn
         except Exception as exc:
             errors[task_id] = str(exc)
@@ -151,7 +160,7 @@ def run_role_turn(
 ) -> dict[str, Any]:
     """Execute one agent turn for *role* via the app-server protocol."""
     key = task_id or role
-    managed = manager.acquire(key, resume_thread_id=resume_thread_id)
+    managed = manager.acquire(key, resume_thread_id=resume_thread_id, cwd=str(repo))
     retried = False
     try:
         while True:
@@ -190,7 +199,7 @@ def run_role_turn(
                 except Exception:
                     pass
                 manager.release(managed)
-                managed = manager.acquire(key)
+                managed = manager.acquire(key, cwd=str(repo))
             except AppServerError:
                 if managed.alive:
                     raise
@@ -203,7 +212,7 @@ def run_role_turn(
                 except Exception:
                     pass
                 manager.release(managed)
-                managed = manager.acquire(key)
+                managed = manager.acquire(key, cwd=str(repo))
     finally:
         manager.release(managed)
 
@@ -324,7 +333,7 @@ def run_runtime(args: argparse.Namespace) -> int:
     execution_policy = str(launch.get("config", {}).get("execution_policy") or DEFAULT_EXECUTION_POLICY)
 
     codex_bin = getattr(args, "codex_bin", "codex")
-    manager = ServerManager(cwd=str(paths.repo), codex_bin=codex_bin)
+    manager = ServerManager(cwd=str(paths.repo), state_dir=str(paths.repo), codex_bin=codex_bin)
     manager.kill_orphans()
     supervisor_lock = threading.Lock()
 
@@ -380,7 +389,7 @@ def run_runtime(args: argparse.Namespace) -> int:
                         attempt=int(record.get("attempt") or 0),
                         trial_commit=str(record.get("trial_commit") or ""),
                     ),
-                    repo=paths.repo,
+                    repo=Path(str(record.get("worktree_path") or paths.repo)),
                     sandbox=sandbox_for_role("verifier", execution_policy),
                 )
                 with supervisor_lock:
@@ -466,6 +475,9 @@ def run_runtime(args: argparse.Namespace) -> int:
                     "trial_commit": "",
                     "thread_id": str(active.get(str(task["id"]), {}).get("thread_id") or ""),
                     "verifier_feedback": str(active.get(str(task["id"]), {}).get("verifier_feedback") or ""),
+                    "branch_name": str(active.get(str(task["id"]), {}).get("branch_name") or ""),
+                    "worktree_path": str(active.get(str(task["id"]), {}).get("worktree_path") or ""),
+                    "base_commit": str(active.get(str(task["id"]), {}).get("base_commit") or ""),
                 }
             _write_state_payload(paths, state_payload)
 
@@ -498,6 +510,17 @@ def run_runtime(args: argparse.Namespace) -> int:
                             return 2
                         if task_id not in results:
                             continue
+                        workspace = results[task_id].get("workspace", {})
+                        if workspace:
+                            state_payload = normalize_state_payload(read_json(paths.state))
+                            active = _active_tasks(state_payload)
+                            if task_id in active:
+                                active[task_id].update({
+                                    "branch_name": str(workspace.get("branch_name") or ""),
+                                    "worktree_path": str(workspace.get("worktree_path") or ""),
+                                    "base_commit": str(workspace.get("base_commit") or ""),
+                                })
+                                _write_state_payload(paths, state_payload)
                         _persist_thread_id(paths, task_id, str(results[task_id]["thread_id"]))
                         with supervisor_lock:
                             decision = evaluate_supervisor_status(repo=paths.repo, report_override=results[task_id]["report"])
@@ -508,6 +531,22 @@ def run_runtime(args: argparse.Namespace) -> int:
                     task = batch_tasks[0]
                     task_id = str(task["id"])
                     record = _active_tasks(state_payload)[task_id]
+                    workspace = prepare_task_worktree(
+                        repo=paths.repo,
+                        task_id=task_id,
+                        branch_name=str(record.get("branch_name") or ""),
+                        worktree_path=str(record.get("worktree_path") or ""),
+                        base_commit=str(record.get("base_commit") or ""),
+                    )
+                    state_payload = normalize_state_payload(read_json(paths.state))
+                    active = _active_tasks(state_payload)
+                    if task_id in active:
+                        active[task_id].update({
+                            "branch_name": str(workspace["branch_name"]),
+                            "worktree_path": str(workspace["worktree_path"]),
+                            "base_commit": str(workspace["base_commit"]),
+                        })
+                        _write_state_payload(paths, state_payload)
                     prompt = build_implementer_prompt_for_task(
                         paths,
                         task,
@@ -526,7 +565,7 @@ def run_runtime(args: argparse.Namespace) -> int:
                         role="implementer",
                         task_id=task_id,
                         prompt=prompt,
-                        repo=paths.repo,
+                        repo=Path(workspace["worktree_path"]),
                         sandbox=sandbox_for_role("implementer", execution_policy),
                         resume_thread_id=str(record.get("thread_id") or "") or None,
                     )
