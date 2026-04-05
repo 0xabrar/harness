@@ -13,6 +13,7 @@ from harness_artifacts import (
     normalize_state_payload,
     read_json,
     refresh_ready_tasks,
+    report_path_for_role,
     task_index,
 )
 
@@ -86,6 +87,19 @@ If prior reports in {paths.reports} show repeated failures on a task, consider s
 Return your report as structured JSON as your final response. The runtime captures it via outputSchema. Do not write report files to disk.
 
 Fields: role, revision, summary, task_changes (added/updated/closed arrays), planner_requested_reason.
+
+Use this exact shape:
+{{
+  "role": "planner",
+  "revision": {revision},
+  "summary": "Brief planning summary.",
+  "task_changes": {{
+    "added": ["T-001"],
+    "updated": [],
+    "closed": []
+  }},
+  "planner_requested_reason": "initial_plan"
+}}
 </output>
 """
 
@@ -148,6 +162,18 @@ Record what you ran in checks_run so the verifier knows what was already validat
 Return your report as structured JSON as your final response. The runtime captures it via outputSchema. Do not write report files to disk.
 
 Fields: role, task_id, attempt, commit, summary, files_changed, checks_run, proposed_tasks.
+
+Use this exact shape:
+{{
+  "role": "implementer",
+  "task_id": "{task['id']}",
+  "attempt": {attempt},
+  "commit": "full git commit sha",
+  "summary": "Brief implementation summary.",
+  "files_changed": ["path/to/file"],
+  "checks_run": ["command you ran"],
+  "proposed_tasks": []
+}}
 </output>
 """
 
@@ -175,7 +201,16 @@ def build_verifier_prompt(
     trial_commit = str(trial_commit or record.get("trial_commit") or "")
     if not attempt or not trial_commit:
         raise HarnessError("Verifier prompt requires task attempt and trial commit.")
+    implementer_report_path = report_path_for_role(paths, "implementer", task_id=task_id, attempt=attempt)
+    try:
+        implementer_report = read_json(implementer_report_path)
+    except Exception:
+        implementer_report = {}
+    files_changed = [str(item) for item in implementer_report.get("files_changed") or []]
+    checks_run = [str(item) for item in implementer_report.get("checks_run") or []]
     criteria = "\n".join(f"- {item}" for item in task.get("acceptance_criteria", []))
+    files_section = "\n".join(f"- {item}" for item in files_changed) or "- none reported"
+    checks_section = "\n".join(f"- {item}" for item in checks_run) or "- none reported"
     return f"""$harness
 You are the verifier role for this harness-managed repo. Default to skepticism — you are here to verify, not to approve.
 
@@ -187,12 +222,23 @@ Acceptance criteria:
 {criteria}
 </task>
 
+<implementer_report>
+Summary: {implementer_report.get('summary', '')}
+Files changed:
+{files_section}
+
+Checks already run by implementer:
+{checks_section}
+</implementer_report>
+
 <verification>
-Do real work to verify the commit:
-- Inspect the actual diff with git show {trial_commit}.
-- Run the tests or validation commands yourself. Do not assume the implementer ran them correctly.
-- Check each acceptance criterion individually. Record pass, fail, or skip with the evidence you gathered.
-- If a criterion says "function returns X", call the function and check.
+Do only the minimum real work needed to verify the commit:
+- Inspect the exact diff with `git show --stat --name-only {trial_commit}`.
+- Focus on the files listed above. Do not do broad repo exploration.
+- Prefer direct checks against the committed content such as `git show {trial_commit}:path/to/file`.
+- Re-run only the smallest commands needed to confirm each criterion yourself.
+- Keep verification tight. In normal cases use no more than 5 shell commands.
+- Check each acceptance criterion individually and record pass, fail, or skip with evidence you gathered.
 </verification>
 
 <verdicts>
@@ -209,6 +255,31 @@ Do not modify code. Do not apply reverts yourself. Do not edit tasks.json. Do no
 Return your report as structured JSON as your final response. The runtime captures it via outputSchema.
 
 Fields: role, task_id, attempt, commit, verdict (accept/revert/needs_human), summary, findings, criteria_results, proposed_tasks.
+
+Use these exact shapes:
+- findings: array of objects with keys description, severity, file, recommendation
+- criteria_results: array of objects with keys criterion, result, evidence
+- proposed_tasks: array of objects with keys title, reason, depends_on, introduced_by
+- If there are no findings or proposed tasks, return [] for those arrays.
+
+Example shape:
+{{
+  "role": "verifier",
+  "task_id": "{task_id}",
+  "attempt": {attempt},
+  "commit": "{trial_commit}",
+  "verdict": "accept",
+  "summary": "Brief verification summary.",
+  "findings": [],
+  "criteria_results": [
+    {{
+      "criterion": "Criterion text",
+      "result": "pass",
+      "evidence": "What you checked."
+    }}
+  ],
+  "proposed_tasks": []
+}}
 </output>
 """
 
