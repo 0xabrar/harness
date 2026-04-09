@@ -92,6 +92,51 @@ def _integration_recovery_details(record: dict[str, Any], *, outcome: str, detai
     return details
 
 
+def _repair_target_task_id(task: dict[str, Any]) -> str:
+    for key in ("repair_target_task_id", "repair_for_task_id", "repair_target"):
+        value = str(task.get(key) or "")
+        if value:
+            return value
+    return ""
+
+
+def _finalize_repair_target(
+    paths,
+    tasks_payload: dict[str, Any],
+    *,
+    repair_task: dict[str, Any],
+    integrated_commit: str,
+) -> None:
+    repair_task_id = str(repair_task["id"])
+    target_id = _repair_target_task_id(repair_task)
+    if not target_id or target_id == repair_task_id:
+        return
+
+    index = task_index(tasks_payload)
+    target = index.get(target_id)
+    if target is None:
+        raise HarnessError(
+            f"Repair task {repair_task_id!r} references missing repair target {target_id!r}."
+        )
+
+    conflict_details = dict(target.get("integration_conflict") or {})
+    if not conflict_details:
+        return
+
+    remove_task_worktree(
+        repo=paths.repo,
+        branch_name=str(conflict_details.get("branch_name") or ""),
+        worktree_path=str(conflict_details.get("worktree_path") or ""),
+    )
+    target.pop("integration_conflict", None)
+
+    target["status"] = "done"
+    target["last_verdict"] = "accept"
+    target["last_integrated_commit"] = integrated_commit
+    target["resolved_by_task_id"] = repair_task_id
+    target.pop("blocked_reason", None)
+
+
 def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
     return (int(task.get("priority", 100)), str(task["id"]))
 
@@ -351,6 +396,17 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
             integration = integrate_commit(repo=paths.repo, commit=commit)
             if integration.outcome != "applied":
                 incident_reason = f"integration_{integration.outcome}"
+                conflict_details = _integration_recovery_details(
+                    record,
+                    outcome=integration.outcome,
+                    detail=integration.detail,
+                    returncode=integration.returncode,
+                )
+                task["integration_conflict"] = {
+                    "attempt": attempt,
+                    "commit": commit,
+                    **conflict_details,
+                }
                 task["status"] = "blocked"
                 task["blocked_reason"] = (
                     f"Accepted task could not be integrated onto main ({integration.outcome})."
@@ -368,12 +424,7 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
                     resume_task_id=task_id,
                     resume_attempt=attempt,
                     commit=commit,
-                    details=_integration_recovery_details(
-                        record,
-                        outcome=integration.outcome,
-                        detail=integration.detail,
-                        returncode=integration.returncode,
-                    ),
+                    details=conflict_details,
                 )
                 return {
                     "decision": "recovery",
@@ -382,6 +433,8 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
                     "tasks": tasks_payload,
                 }
             integrated_commit = integration.integrated_commit
+        task.pop("integration_conflict", None)
+        _finalize_repair_target(paths, tasks_payload, repair_task=task, integrated_commit=integrated_commit)
         _clear_recovery(state_payload)
         state_payload["state"]["last_status"] = "accept"
         task["status"] = "done"

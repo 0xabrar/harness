@@ -166,6 +166,9 @@ class TestPlannerPrompt(unittest.TestCase):
         self.assertIn("Incident details:", prompt)
         self.assertIn("- commit: deadbeef", prompt)
         self.assertIn('"outcome": "conflict"', prompt)
+        self.assertIn("Integration-conflict repair rules:", prompt)
+        self.assertIn('repair_target_task_id: "T-001"', prompt)
+        self.assertIn("fresh worktree", prompt)
         self.assertIn("Create repair or sequencing tasks for semantic recovery", prompt)
 
     def test_pending_retry_recovery_includes_retry_details(self) -> None:

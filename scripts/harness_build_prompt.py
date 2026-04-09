@@ -98,6 +98,18 @@ def _planner_recovery_context(state: dict, tasks: dict) -> str:
                     + json.dumps(dict(incident.get("details") or {}), sort_keys=True),
                 ]
             )
+            incident_reason = str(incident.get("reason") or reason)
+            incident_task_id = str(incident.get("resume_task_id") or recovery.get("resume_task_id") or "")
+            if incident_reason == "integration_conflict" and incident_task_id:
+                lines.extend(
+                    [
+                        "Integration-conflict repair rules:",
+                        "- Keep the original conflicted task unfinished until a repair task is accepted and integrated.",
+                        "- Create a dedicated repair task that runs against the current main branch in a fresh worktree.",
+                        f'- Add `repair_target_task_id: "{incident_task_id}"` to that repair task so the runtime can close the original task after verification.',
+                        "- Do not make the blocked task a dependency of the repair task.",
+                    ]
+                )
 
         retry = recovery.get("retry") or {}
         if any(retry.get(key) for key in ("count", "reason", "resume_role", "resume_task_id", "resume_attempt")):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +39,16 @@ def _mock_manager(*, final_message: str = '{"role":"planner","revision":1}') -> 
     manager = MagicMock()
     manager.acquire.return_value = ms
     return manager
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1307,6 +1318,224 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
             self.assertEqual("clear", state_payload["state"]["recovery"]["status"])
             self.assertEqual("", state_payload["state"]["planner_pending_reason"])
+
+    def test_integration_conflict_repair_task_runs_in_fresh_worktree_and_resolves_original_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "-b", "main")
+            _git(repo, "config", "user.email", "test@example.com")
+            _git(repo, "config", "user.name", "Test")
+            (repo / "app.txt").write_text("base\n", encoding="utf-8")
+            _git(repo, "add", "app.txt")
+            _git(repo, "commit", "-m", "base")
+
+            paths = default_paths(repo)
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Repair accepted integration conflicts",
+                    prompt_text=None,
+                    config={
+                        "goal": "Repair accepted integration conflicts",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 2,
+                    },
+                ),
+            )
+            initialize_run(
+                repo=repo,
+                goal="Repair accepted integration conflicts",
+                scope=".",
+                session_mode="background",
+                execution_policy="danger_full_access",
+                max_task_attempts=2,
+                force=True,
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Repair accepted integration conflicts",
+                    "planner_revision": 1,
+                    "tasks": [
+                        {
+                            "id": "T-001",
+                            "title": "Implement feature",
+                            "description": "Replace the base file contents with feature text.",
+                            "acceptance_criteria": ["app.txt includes the feature text"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        }
+                    ],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+
+            call_order: list[tuple[str, str]] = []
+            commits: dict[str, str] = {}
+            worktrees: dict[str, str] = {}
+
+            class FakeServerManager:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+
+                def kill_orphans(self) -> None:
+                    return None
+
+                def shutdown(self) -> None:
+                    return None
+
+            def fake_run_role_turn(*, role: str, task_id: str, repo: Path, **kwargs: Any) -> dict[str, Any]:
+                call_order.append((role, task_id))
+                if role == "planner":
+                    state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+                    self.assertEqual("planner", state_payload["state"]["recovery"]["owner"])
+                    self.assertEqual("integration_conflict", state_payload["state"]["recovery"]["reason"])
+                    self.assertEqual("T-001", state_payload["state"]["recovery"]["resume_task_id"])
+                    self.assertEqual("integration_conflict", state_payload["state"]["planner_pending_reason"])
+
+                    tasks_payload = json.loads(paths.tasks.read_text(encoding="utf-8"))
+                    original = next(task for task in tasks_payload["tasks"] if task["id"] == "T-001")
+                    self.assertEqual("blocked", original["status"])
+                    self.assertEqual("accept", original["last_verdict"])
+                    self.assertEqual("conflict", original["integration_conflict"]["outcome"])
+
+                    tasks_payload["planner_revision"] = 2
+                    tasks_payload["tasks"].append(
+                        {
+                            "id": "T-002",
+                            "title": "Repair T-001 integration conflict",
+                            "description": "Re-apply T-001 on top of the latest main branch.",
+                            "acceptance_criteria": ["app.txt keeps the mainline text and adds the feature text"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                            "repair_target_task_id": "T-001",
+                        }
+                    )
+                    write_tasks(paths.tasks, tasks_payload)
+                    return {
+                        "report": {
+                            "role": "planner",
+                            "revision": 2,
+                            "summary": "Added a repair task for the accepted integration conflict.",
+                            "task_changes": {"added": ["T-002"], "updated": ["T-001"], "closed": []},
+                            "planner_requested_reason": "integration_conflict",
+                        },
+                        "thread_id": "planner-thread",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+
+                if role == "implementer":
+                    worktrees[task_id] = str(repo)
+                    if task_id == "T-001":
+                        (repo / "app.txt").write_text("feature\n", encoding="utf-8")
+                        _git(repo, "add", "app.txt")
+                        _git(repo, "commit", "-m", "implement feature")
+                        commits[task_id] = _git(repo, "rev-parse", "HEAD")
+
+                        (paths.repo / "app.txt").write_text("mainline\n", encoding="utf-8")
+                        _git(paths.repo, "add", "app.txt")
+                        _git(paths.repo, "commit", "-m", "mainline change")
+                    else:
+                        self.assertNotEqual(worktrees["T-001"], str(repo))
+                        self.assertEqual("mainline\n", (repo / "app.txt").read_text(encoding="utf-8"))
+                        (repo / "app.txt").write_text("mainline\nfeature\n", encoding="utf-8")
+                        _git(repo, "add", "app.txt")
+                        _git(repo, "commit", "-m", "repair feature integration")
+                        commits[task_id] = _git(repo, "rev-parse", "HEAD")
+
+                    return {
+                        "report": {
+                            "role": "implementer",
+                            "task_id": task_id,
+                            "attempt": 1,
+                            "commit": commits[task_id],
+                            "summary": f"implemented {task_id}",
+                            "files_changed": ["app.txt"],
+                            "checks_run": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": f"thread-{task_id}",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+
+                if task_id == "T-002":
+                    tasks_payload = json.loads(paths.tasks.read_text(encoding="utf-8"))
+                    original = next(task for task in tasks_payload["tasks"] if task["id"] == "T-001")
+                    self.assertEqual("blocked", original["status"])
+
+                return {
+                    "report": {
+                        "role": "verifier",
+                        "task_id": task_id,
+                        "attempt": 1,
+                        "commit": commits[task_id],
+                        "verdict": "accept",
+                        "recovery_signal": "none",
+                        "summary": f"verified {task_id}",
+                        "findings": [],
+                        "criteria_results": [],
+                        "proposed_tasks": [],
+                    },
+                    "thread_id": f"verify-{task_id}",
+                    "turn_result": {},
+                    "parse_error": None,
+                }
+
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
+                "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
+            ), patch("harness_runtime_ops.time.sleep", return_value=None):
+                exit_code = run_runtime(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                call_order,
+                [
+                    ("implementer", "T-001"),
+                    ("verifier", "T-001"),
+                    ("planner", ""),
+                    ("implementer", "T-002"),
+                    ("verifier", "T-002"),
+                ],
+            )
+            self.assertNotEqual(worktrees["T-001"], worktrees["T-002"])
+            self.assertEqual("mainline\nfeature\n", (repo / "app.txt").read_text(encoding="utf-8"))
+
+            tasks_payload = json.loads(paths.tasks.read_text(encoding="utf-8"))
+            original = next(task for task in tasks_payload["tasks"] if task["id"] == "T-001")
+            repair = next(task for task in tasks_payload["tasks"] if task["id"] == "T-002")
+            integrated_head = _git(repo, "rev-parse", "HEAD")
+            self.assertEqual("done", original["status"])
+            self.assertEqual("done", repair["status"])
+            self.assertEqual("T-002", original["resolved_by_task_id"])
+            self.assertEqual(integrated_head, original["last_integrated_commit"])
+            self.assertEqual(integrated_head, repair["last_integrated_commit"])
+            self.assertNotIn("integration_conflict", original)
+
+            self.assertFalse(Path(worktrees["T-001"]).exists())
+            self.assertFalse(Path(worktrees["T-002"]).exists())
+
+            state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+            self.assertEqual("clear", state_payload["state"]["recovery"]["status"])
+            self.assertEqual({}, state_payload["state"]["active_tasks"])
+
+            runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
+            self.assertEqual("terminal", runtime_payload["status"])
+            self.assertEqual("all_tasks_done", runtime_payload["terminal_reason"])
 
     def test_complex_dag_with_parallel_fan_in_and_retry_reaches_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
