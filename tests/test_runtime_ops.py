@@ -770,7 +770,14 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
                 "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
             ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
-                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+                "harness_supervisor_status.integrate_commit",
+                side_effect=lambda **kwargs: IntegrationResult(
+                    outcome="applied",
+                    integrated_commit=f"integrated-{kwargs['commit']}",
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
             ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
                 "harness_runtime_ops.time.sleep", return_value=None
             ) as mock_sleep:
@@ -788,7 +795,7 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             self.assertEqual("all_tasks_done", runtime_payload["terminal_reason"])
             self.assertEqual("clear", runtime_payload["recovery"]["status"])
 
-    def test_run_runtime_exhausts_worktree_retry_budget_into_runtime_recovery(self) -> None:
+    def test_run_runtime_exhausted_worktree_retries_handoff_to_planner_and_continue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             paths = default_paths(repo)
@@ -842,6 +849,7 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             )
 
             attempts = {"prepare": 0}
+            call_order: list[tuple[str, str]] = []
 
             class FakeServerManager:
                 def __init__(self, **kwargs: Any) -> None:
@@ -855,38 +863,109 @@ class TestRunRuntimeScheduling(unittest.TestCase):
 
             def fake_prepare_task_worktree(**kwargs: Any) -> dict[str, str]:
                 attempts["prepare"] += 1
-                raise HarnessError("simulated worktree prepare failure")
+                if attempts["prepare"] < 3:
+                    raise HarnessError("simulated worktree prepare failure")
+                worktree = repo / "worktree-T-001"
+                worktree.mkdir(exist_ok=True)
+                return {
+                    "branch_name": "branch-T-001",
+                    "worktree_path": str(worktree),
+                    "base_commit": "base-commit",
+                }
+
+            def fake_run_role_turn(*, role: str, task_id: str, **kwargs: Any) -> dict[str, Any]:
+                call_order.append((role, task_id))
+                if role == "planner":
+                    state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+                    self.assertEqual("runtime", state_payload["state"]["recovery"]["owner"])
+                    self.assertEqual(2, state_payload["state"]["recovery"]["retry"]["count"])
+                    self.assertEqual("worktree_prepare_failed", state_payload["state"]["recovery"]["retry"]["reason"])
+                    self.assertEqual("implementer", state_payload["state"]["recovery"]["retry"]["resume_role"])
+                    self.assertEqual("T-001", state_payload["state"]["recovery"]["retry"]["resume_task_id"])
+                    self.assertEqual("worktree_prepare_failed", state_payload["state"]["planner_pending_reason"])
+                    task_payload = json.loads(paths.tasks.read_text(encoding="utf-8"))
+                    self.assertEqual("blocked", task_payload["tasks"][0]["status"])
+                    task_payload["planner_revision"] = 2
+                    task_payload["tasks"][0]["status"] = "ready"
+                    task_payload["tasks"][0].pop("blocked_reason", None)
+                    write_tasks(paths.tasks, task_payload)
+                    return {
+                        "report": {
+                            "role": "planner",
+                            "revision": 2,
+                            "summary": "Unblocked the task after runtime recovery.",
+                            "task_changes": {"added": [], "updated": ["T-001"], "closed": []},
+                            "planner_requested_reason": "worktree_prepare_failed",
+                        },
+                        "thread_id": "planner-thread",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+                if role == "implementer":
+                    return {
+                        "report": {
+                            "role": "implementer",
+                            "task_id": task_id,
+                            "attempt": 1,
+                            "commit": "commit-T-001",
+                            "summary": "implemented after planner handoff",
+                            "files_changed": ["task.txt"],
+                            "checks_run": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": "thread-T-001",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+                return {
+                    "report": {
+                        "role": "verifier",
+                        "task_id": task_id,
+                        "attempt": 1,
+                        "commit": "commit-T-001",
+                        "verdict": "accept",
+                        "summary": "verified",
+                        "findings": [],
+                        "criteria_results": [],
+                        "proposed_tasks": [],
+                    },
+                    "thread_id": "verify-T-001",
+                    "turn_result": {},
+                    "parse_error": None,
+                }
 
             args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
 
             with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
                 "harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree
-            ), patch("harness_runtime_ops.run_role_turn") as mock_run_role_turn, patch(
+            ), patch("harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn), patch(
+                "harness_supervisor_status.integrate_commit",
+                side_effect=lambda **kwargs: IntegrationResult(
+                    outcome="applied",
+                    integrated_commit=f"integrated-{kwargs['commit']}",
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
                 "harness_runtime_ops.time.sleep", return_value=None
             ) as mock_sleep:
                 exit_code = run_runtime(args)
 
-            self.assertEqual(exit_code, 2)
-            self.assertEqual(attempts["prepare"], 2)
-            self.assertEqual(mock_run_role_turn.call_count, 0)
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(attempts["prepare"], 3)
+            self.assertEqual(call_order, [("planner", ""), ("implementer", "T-001"), ("verifier", "T-001")])
             self.assertGreaterEqual(mock_sleep.call_count, 1)
 
             state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
-            self.assertEqual("pending", state_payload["state"]["recovery"]["status"])
-            self.assertEqual("runtime", state_payload["state"]["recovery"]["owner"])
-            self.assertEqual(2, state_payload["state"]["recovery"]["retry"]["count"])
-            self.assertEqual("worktree_prepare_failed", state_payload["state"]["recovery"]["retry"]["reason"])
-            self.assertEqual("implementer", state_payload["state"]["recovery"]["retry"]["resume_role"])
-            self.assertEqual("T-001", state_payload["state"]["recovery"]["retry"]["resume_task_id"])
-            self.assertEqual(1, state_payload["state"]["recovery"]["retry"]["resume_attempt"])
+            self.assertEqual("clear", state_payload["state"]["recovery"]["status"])
+            self.assertEqual("", state_payload["state"]["planner_pending_reason"])
+            self.assertEqual({}, state_payload["state"]["active_tasks"])
 
             runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
-            self.assertEqual("recovery", runtime_payload["status"])
-            self.assertIn("simulated worktree prepare failure", runtime_payload["terminal_reason"])
-            self.assertEqual("pending", runtime_payload["recovery"]["status"])
-            self.assertEqual("runtime", runtime_payload["recovery"]["owner"])
-            self.assertEqual(2, runtime_payload["recovery"]["retry"]["count"])
-            self.assertEqual("worktree_prepare_failed", runtime_payload["recovery"]["retry"]["reason"])
+            self.assertEqual("terminal", runtime_payload["status"])
+            self.assertEqual("all_tasks_done", runtime_payload["terminal_reason"])
+            self.assertEqual("clear", runtime_payload["recovery"]["status"])
 
     def test_multiple_ready_tasks_run_one_implementer_turn_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1037,7 +1116,7 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             self.assertEqual(runtime_payload["status"], "terminal")
             self.assertEqual(runtime_payload["terminal_reason"], "all_tasks_done")
 
-    def test_cherry_pick_conflict_moves_runtime_into_recovery(self) -> None:
+    def test_planner_owned_recovery_dispatches_planner_follow_up_and_reaches_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             paths = default_paths(repo)
@@ -1045,10 +1124,10 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             write_json_atomic(
                 paths.launch,
                 build_launch_manifest(
-                    original_goal="Run one task with a cherry-pick conflict",
+                    original_goal="Run one task through planner-owned recovery",
                     prompt_text=None,
                     config={
-                        "goal": "Run one task with a cherry-pick conflict",
+                        "goal": "Run one task through planner-owned recovery",
                         "scope": ".",
                         "session_mode": "background",
                         "execution_policy": "danger_full_access",
@@ -1060,7 +1139,7 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             )
             initialize_run(
                 repo=repo,
-                goal="Run one task with a cherry-pick conflict",
+                goal="Run one task through planner-owned recovery",
                 scope=".",
                 session_mode="background",
                 execution_policy="danger_full_access",
@@ -1071,13 +1150,13 @@ class TestRunRuntimeScheduling(unittest.TestCase):
                 paths.tasks,
                 {
                     "version": 1,
-                    "goal": "Run one task with a cherry-pick conflict",
+                    "goal": "Run one task through planner-owned recovery",
                     "planner_revision": 1,
                     "tasks": [
                         {
                             "id": "T-001",
                             "title": "Task T-001",
-                            "description": "Conflicting task",
+                            "description": "Task that needs planner clarification",
                             "acceptance_criteria": ["done"],
                             "status": "ready",
                             "priority": 1,
@@ -1090,20 +1169,68 @@ class TestRunRuntimeScheduling(unittest.TestCase):
                 },
             )
 
+            call_order: list[tuple[str, str]] = []
+
             def fake_run_role_turn(*, role: str, task_id: str, **kwargs: Any) -> dict[str, Any]:
+                call_order.append((role, task_id))
+                if role == "planner":
+                    state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+                    self.assertEqual("planner", state_payload["state"]["recovery"]["owner"])
+                    self.assertEqual("ambiguous_acceptance_criteria", state_payload["state"]["recovery"]["reason"])
+                    self.assertEqual("T-001", state_payload["state"]["recovery"]["resume_task_id"])
+                    self.assertEqual("ambiguous_acceptance_criteria", state_payload["state"]["planner_pending_reason"])
+                    task_payload = json.loads(paths.tasks.read_text(encoding="utf-8"))
+                    self.assertEqual("blocked", task_payload["tasks"][0]["status"])
+                    task_payload["planner_revision"] = 2
+                    task_payload["tasks"][0]["status"] = "ready"
+                    task_payload["tasks"][0]["description"] = "Clarified by planner for retry"
+                    task_payload["tasks"][0].pop("blocked_reason", None)
+                    write_tasks(paths.tasks, task_payload)
+                    return {
+                        "report": {
+                            "role": "planner",
+                            "revision": 2,
+                            "summary": "Clarified the blocked task and requeued it.",
+                            "task_changes": {"added": [], "updated": ["T-001"], "closed": []},
+                            "planner_requested_reason": "ambiguous_acceptance_criteria",
+                        },
+                        "thread_id": "planner-thread",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
                 if role == "implementer":
+                    attempt = 1 if call_order.count(("implementer", task_id)) == 1 else 2
                     return {
                         "report": {
                             "role": "implementer",
                             "task_id": task_id,
-                            "attempt": 1,
-                            "commit": "commit-T-001",
-                            "summary": "implemented",
+                            "attempt": attempt,
+                            "commit": f"commit-T-001-a{attempt}",
+                            "summary": f"implemented attempt {attempt}",
                             "files_changed": ["T-001.txt"],
                             "checks_run": [],
                             "proposed_tasks": [],
                         },
-                        "thread_id": "thread-T-001",
+                        "thread_id": f"thread-T-001-a{attempt}",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+                attempt = 1 if call_order.count(("verifier", task_id)) == 1 else 2
+                if attempt == 1:
+                    return {
+                        "report": {
+                            "role": "verifier",
+                            "task_id": task_id,
+                            "attempt": 1,
+                            "commit": "commit-T-001-a1",
+                            "verdict": "revert",
+                            "recovery_signal": "ambiguous_acceptance_criteria",
+                            "summary": "Acceptance needs planner clarification",
+                            "findings": [],
+                            "criteria_results": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": "verify-T-001-a1",
                         "turn_result": {},
                         "parse_error": None,
                     }
@@ -1111,15 +1238,16 @@ class TestRunRuntimeScheduling(unittest.TestCase):
                     "report": {
                         "role": "verifier",
                         "task_id": task_id,
-                        "attempt": 1,
-                        "commit": "commit-T-001",
+                        "attempt": 2,
+                        "commit": "commit-T-001-a2",
                         "verdict": "accept",
-                        "summary": "verified",
+                        "recovery_signal": "none",
+                        "summary": "verified after planner follow-up",
                         "findings": [],
                         "criteria_results": [],
                         "proposed_tasks": [],
                     },
-                    "thread_id": "verify-T-001",
+                    "thread_id": "verify-T-001-a2",
                     "turn_result": {},
                     "parse_error": None,
                 }
@@ -1149,26 +1277,36 @@ class TestRunRuntimeScheduling(unittest.TestCase):
                 "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
             ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
                 "harness_supervisor_status.integrate_commit",
-                return_value=IntegrationResult(
-                    outcome="conflict",
-                    integrated_commit="",
-                    returncode=1,
+                side_effect=lambda **kwargs: IntegrationResult(
+                    outcome="applied",
+                    integrated_commit=f"integrated-{kwargs['commit']}",
+                    returncode=0,
                     stdout="",
-                    stderr="simulated cherry-pick conflict",
+                    stderr="",
                 ),
-            ), patch("harness_runtime_ops.time.sleep", return_value=None):
+            ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
+                "harness_runtime_ops.time.sleep", return_value=None
+            ):
                 exit_code = run_runtime(args)
 
-            self.assertEqual(exit_code, 2)
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                call_order,
+                [
+                    ("implementer", "T-001"),
+                    ("verifier", "T-001"),
+                    ("planner", ""),
+                    ("implementer", "T-001"),
+                    ("verifier", "T-001"),
+                ],
+            )
             runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
-            self.assertEqual(runtime_payload["status"], "recovery")
-            self.assertEqual("integration_conflict", runtime_payload["terminal_reason"])
-            self.assertEqual("pending", runtime_payload["recovery"]["status"])
-            self.assertEqual("planner", runtime_payload["recovery"]["owner"])
+            self.assertEqual(runtime_payload["status"], "terminal")
+            self.assertEqual("all_tasks_done", runtime_payload["terminal_reason"])
+            self.assertEqual("clear", runtime_payload["recovery"]["status"])
             state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
-            self.assertEqual("planner", state_payload["state"]["recovery"]["owner"])
-            self.assertEqual("commit-T-001", state_payload["state"]["recovery"]["incident"]["commit"])
-            self.assertEqual("conflict", state_payload["state"]["recovery"]["incident"]["details"]["outcome"])
+            self.assertEqual("clear", state_payload["state"]["recovery"]["status"])
+            self.assertEqual("", state_payload["state"]["planner_pending_reason"])
 
     def test_complex_dag_with_parallel_fan_in_and_retry_reaches_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

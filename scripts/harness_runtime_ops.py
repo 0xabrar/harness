@@ -33,6 +33,7 @@ from harness_artifacts import (
     task_index,
     utc_now,
     write_json_atomic,
+    write_tasks,
 )
 from harness_build_prompt import (
     build_implementer_prompt_for_task,
@@ -138,6 +139,10 @@ def _ready_tasks_not_active(tasks_payload: dict[str, Any], state_payload: dict[s
     return [task for task in all_ready_tasks(tasks_payload) if str(task["id"]) not in active]
 
 
+def _has_unfinished_tasks(tasks_payload: dict[str, Any]) -> bool:
+    return any(str(task.get("status") or "") != "done" for task in tasks_payload.get("tasks", []))
+
+
 def _clear_runtime_recovery(runtime: dict[str, Any]) -> None:
     runtime["recovery"] = default_recovery_payload()
     runtime["last_error"] = ""
@@ -239,6 +244,59 @@ def _clear_runtime_retry_state(paths: Paths, runtime: dict[str, Any]) -> None:
         runtime["terminal_reason"] = "none"
         _clear_runtime_recovery(runtime)
         persist_runtime(paths.runtime, runtime)
+
+
+def _schedule_planner_follow_up(
+    paths: Paths,
+    runtime: dict[str, Any],
+    *,
+    reason: str,
+    task_id: str = "",
+    task_reason: str = "",
+) -> None:
+    state_payload = normalize_state_payload(read_json(paths.state))
+    active = _active_tasks(state_payload)
+    if task_id:
+        active.pop(task_id, None)
+
+    tasks_payload = load_tasks(paths.tasks)
+    tasks_changed = False
+    if task_id:
+        task = task_index(tasks_payload).get(task_id)
+        if task is not None and str(task.get("status") or "") != "done":
+            if str(task.get("status") or "") != "failed":
+                task["status"] = "blocked"
+            task["blocked_reason"] = task_reason or reason
+            tasks_changed = True
+
+    if not str(state_payload["state"].get("planner_pending_reason") or ""):
+        state_payload["state"]["planner_pending_reason"] = reason or "planner_recovery_pending"
+    state_payload["state"]["last_status"] = "recovery"
+    _write_state_payload(paths, state_payload)
+    if tasks_changed:
+        write_tasks(paths.tasks, tasks_payload)
+
+    runtime["status"] = "running"
+    runtime["terminal_reason"] = "none"
+    runtime["recovery"] = state_payload["state"]["recovery"]
+    persist_runtime(paths.runtime, runtime)
+
+
+def _continue_planner_recovery(paths: Paths, runtime: dict[str, Any], *, reason: str) -> bool:
+    if not _has_unfinished_tasks(load_tasks(paths.tasks)):
+        return False
+    _schedule_planner_follow_up(paths, runtime, reason=reason)
+    return True
+
+
+def _handoff_runtime_retry_to_planner(paths: Paths, runtime: dict[str, Any], exc: RuntimeRetryExhausted) -> None:
+    _schedule_planner_follow_up(
+        paths,
+        runtime,
+        reason=exc.reason,
+        task_id=exc.resume_task_id,
+        task_reason=str(exc.cause) or exc.reason,
+    )
 
 
 def _is_retryable_app_server_error(exc: BaseException) -> bool:
@@ -636,9 +694,12 @@ def run_runtime(args: argparse.Namespace) -> int:
                         is_retryable=lambda exc: isinstance(exc, (HarnessError, OSError)),
                         operation=lambda: evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"]),
                     )
-            except RuntimeRetryExhausted:
-                manager.shutdown()
-                return 2
+            except RuntimeRetryExhausted as exc:
+                runtime["last_decision"] = "run_planner"
+                runtime["last_reason"] = exc.reason
+                _handoff_runtime_retry_to_planner(paths, runtime, exc)
+                time.sleep(args.sleep_seconds)
+                continue
             except (HarnessError, AppServerError, OSError) as exc:
                 _set_runtime_recovery(
                     runtime,
@@ -653,8 +714,6 @@ def run_runtime(args: argparse.Namespace) -> int:
 
             runtime["last_decision"] = decision["decision"]
             runtime["last_reason"] = decision["reason"]
-            _clear_runtime_recovery(runtime)
-            persist_runtime(paths.runtime, runtime)
 
             if decision["decision"] == "stop":
                 runtime["status"] = "terminal"
@@ -664,6 +723,9 @@ def run_runtime(args: argparse.Namespace) -> int:
                 manager.shutdown()
                 return 0
             if decision["decision"] == "recovery":
+                if _continue_planner_recovery(paths, runtime, reason=str(decision["reason"])):
+                    time.sleep(args.sleep_seconds)
+                    continue
                 _set_runtime_recovery(
                     runtime,
                     reason=decision["reason"],
@@ -674,14 +736,13 @@ def run_runtime(args: argparse.Namespace) -> int:
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
+            _clear_runtime_recovery(runtime)
+            persist_runtime(paths.runtime, runtime)
             time.sleep(args.sleep_seconds)
             continue
 
         planner_pending_reason = str(state_payload["state"].get("planner_pending_reason") or "")
         if planner_pending_reason and not active:
-            state_payload["state"]["planner_pending_reason"] = ""
-            _write_state_payload(paths, state_payload)
-
             runtime["last_role"] = "planner"
             runtime["last_task_id"] = ""
             persist_runtime(paths.runtime, runtime)
@@ -707,9 +768,12 @@ def run_runtime(args: argparse.Namespace) -> int:
                 )
                 with supervisor_lock:
                     decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
-            except RuntimeRetryExhausted:
-                manager.shutdown()
-                return 2
+            except RuntimeRetryExhausted as exc:
+                runtime["last_decision"] = "run_planner"
+                runtime["last_reason"] = exc.reason
+                _handoff_runtime_retry_to_planner(paths, runtime, exc)
+                time.sleep(args.sleep_seconds)
+                continue
             except (HarnessError, AppServerError, OSError) as exc:
                 _set_runtime_recovery(runtime, reason=str(exc), resume_role="planner")
                 persist_runtime(paths.runtime, runtime)
@@ -718,8 +782,6 @@ def run_runtime(args: argparse.Namespace) -> int:
 
             runtime["last_decision"] = decision["decision"]
             runtime["last_reason"] = decision["reason"]
-            _clear_runtime_recovery(runtime)
-            persist_runtime(paths.runtime, runtime)
 
             if decision["decision"] == "stop":
                 runtime["status"] = "terminal"
@@ -729,10 +791,15 @@ def run_runtime(args: argparse.Namespace) -> int:
                 manager.shutdown()
                 return 0
             if decision["decision"] == "recovery":
+                if _continue_planner_recovery(paths, runtime, reason=str(decision["reason"])):
+                    time.sleep(args.sleep_seconds)
+                    continue
                 _set_runtime_recovery(runtime, reason=decision["reason"], owner="planner", resume_role="planner")
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
+            _clear_runtime_recovery(runtime)
+            persist_runtime(paths.runtime, runtime)
             time.sleep(args.sleep_seconds)
             continue
 
@@ -802,8 +869,6 @@ def run_runtime(args: argparse.Namespace) -> int:
                             decision = evaluate_supervisor_status(repo=paths.repo, report_override=results[task_id]["report"])
                     runtime["last_decision"] = decision["decision"]
                     runtime["last_reason"] = decision["reason"]
-                    _clear_runtime_recovery(runtime)
-                    persist_runtime(paths.runtime, runtime)
                 else:
                     task = batch_tasks[0]
                     task_id = str(task["id"])
@@ -872,11 +937,12 @@ def run_runtime(args: argparse.Namespace) -> int:
                     runtime["last_decision"] = decision["decision"]
                     runtime["last_reason"] = decision["reason"]
                     runtime["last_task_id"] = task_id
-                    _clear_runtime_recovery(runtime)
-                    persist_runtime(paths.runtime, runtime)
-            except RuntimeRetryExhausted:
-                manager.shutdown()
-                return 2
+            except RuntimeRetryExhausted as exc:
+                runtime["last_decision"] = "run_planner"
+                runtime["last_reason"] = exc.reason
+                _handoff_runtime_retry_to_planner(paths, runtime, exc)
+                time.sleep(args.sleep_seconds)
+                continue
             except (HarnessError, AppServerError, OSError) as exc:
                 active = _active_tasks(state_payload)
                 task_id = implementer_ids[0] if implementer_ids else ""
@@ -900,10 +966,15 @@ def run_runtime(args: argparse.Namespace) -> int:
                 manager.shutdown()
                 return 0
             if decision["decision"] == "recovery":
+                if _continue_planner_recovery(paths, runtime, reason=str(decision["reason"])):
+                    time.sleep(args.sleep_seconds)
+                    continue
                 _set_runtime_recovery(runtime, reason=decision["reason"], owner="planner", resume_role="planner")
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
+            _clear_runtime_recovery(runtime)
+            persist_runtime(paths.runtime, runtime)
             time.sleep(args.sleep_seconds)
             continue
 
@@ -942,9 +1013,12 @@ def run_runtime(args: argparse.Namespace) -> int:
             )
             with supervisor_lock:
                 decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
-        except RuntimeRetryExhausted:
-            manager.shutdown()
-            return 2
+        except RuntimeRetryExhausted as exc:
+            runtime["last_decision"] = "run_planner"
+            runtime["last_reason"] = exc.reason
+            _handoff_runtime_retry_to_planner(paths, runtime, exc)
+            time.sleep(args.sleep_seconds)
+            continue
         except (HarnessError, AppServerError, OSError) as exc:
             _set_runtime_recovery(runtime, reason=str(exc), resume_role="planner")
             persist_runtime(paths.runtime, runtime)
@@ -953,8 +1027,6 @@ def run_runtime(args: argparse.Namespace) -> int:
 
         runtime["last_decision"] = decision["decision"]
         runtime["last_reason"] = decision["reason"]
-        _clear_runtime_recovery(runtime)
-        persist_runtime(paths.runtime, runtime)
 
         if decision["decision"] == "stop":
             runtime["status"] = "terminal"
@@ -964,10 +1036,15 @@ def run_runtime(args: argparse.Namespace) -> int:
             manager.shutdown()
             return 0
         if decision["decision"] == "recovery":
+            if _continue_planner_recovery(paths, runtime, reason=str(decision["reason"])):
+                time.sleep(args.sleep_seconds)
+                continue
             _set_runtime_recovery(runtime, reason=decision["reason"], owner="planner", resume_role="planner")
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 2
+        _clear_runtime_recovery(runtime)
+        persist_runtime(paths.runtime, runtime)
         time.sleep(args.sleep_seconds)
 
 
