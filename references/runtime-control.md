@@ -9,7 +9,7 @@ The runtime control plane is a dumb script layer modeled after `codex-autoresear
 - detached background execution
 - app-server JSON-RPC role turns
 - artifact consistency checks
-- `needs_human` transitions
+- recovery transitions
 
 It is **not** a fourth reasoning agent.
 
@@ -25,9 +25,9 @@ The runtime:
 6. Sends a `turn/start` request to the app-server for that role (with the appropriate sandbox mode and `outputSchema`).
 7. Applies verifier verdicts (`accept` or `revert`), including cherry-picking accepted task commits onto main and resetting rejected task worktrees for retry.
 8. Updates `harness-runtime.json`, `harness-state.json`, `harness-events.tsv`, and `harness-lessons.md`.
-9. Transitions to `needs_human` if progress is unsafe or inconsistent.
+9. Transitions into recovery if progress is unsafe or inconsistent.
 
-Typical `needs_human` cases are ambiguous acceptance criteria, environment blockers during verification, and cherry-pick conflicts when integrating accepted task-local commits onto main.
+Typical recovery cases are ambiguous acceptance criteria, environment blockers during verification, and integration failures while applying accepted task-local commits onto main.
 
 ## Non-Responsibilities
 
@@ -71,7 +71,7 @@ The runtime may emit only these high-level control decisions:
 - `apply_accept`
 - `apply_revert`
 - `stop`
-- `needs_human`
+- `recovery`
 
 ## Planner Interaction
 

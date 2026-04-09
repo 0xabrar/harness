@@ -8,9 +8,9 @@ The harness is a role-driven loop over a dynamic task DAG.
 - `implementing`
 - `verifying`
 - `idle`
+- `recovery`
 - `completed`
-- `stopped`
-- `needs_human`
+- `terminal`
 
 ## High-Level Transitions
 
@@ -22,8 +22,8 @@ verifying -> implementing   (after revert + retry)
 verifying -> planning       (after replan request or new proposals)
 verifying -> idle           (if no task is immediately ready)
 idle -> completed           (all non-optional tasks done)
-* -> needs_human            (artifact inconsistency, repeated failure, hard blocker)
-* -> stopped                (user stop)
+* -> recovery               (artifact inconsistency, repeated failure, hard blocker)
+* -> terminal               (all tasks done or user stop)
 ```
 
 ## Replan Triggers
@@ -41,11 +41,11 @@ Schedule planner when:
 - `accept`: keep the task-local trial commit, cherry-pick it onto main, mark the task `done`, and clear task-local runtime state.
 - `revert`: leave main untouched, reset the task worktree back to its base commit, requeue or block the task, and schedule planner if needed.
 
-## `needs_human`
+## Recovery
 
-Enter `needs_human` only for:
+Enter recovery only for:
 
 - invalid or inconsistent artifacts,
 - repeated unchanged role exits,
 - broken repo state that the runtime cannot repair safely,
-- explicit verifier escalation.
+- explicit recovery requests from verification.

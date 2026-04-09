@@ -68,7 +68,8 @@ The verifier may:
 
 - run deterministic verification,
 - inspect changed files,
-- produce `accept`, `revert`, or `needs_human`,
+- produce `accept` or `revert`,
+- surface ambiguous verification as recovery context for the runtime,
 - propose follow-up tasks in its report.
 
 The verifier must not:

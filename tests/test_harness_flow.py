@@ -219,7 +219,7 @@ class HarnessFlowTests(unittest.TestCase):
             self.assertEqual(outcome["reason"], "retry_task")
             self.assertNotEqual(git(repo, "rev-parse", "--short", "HEAD"), trial_commit)
 
-    def test_verifier_needs_human_counts_once_and_blocks_task(self) -> None:
+    def test_verifier_recovery_request_counts_once_and_blocks_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = setup_repo(Path(tmp))
             initialize_run(
@@ -280,14 +280,17 @@ class HarnessFlowTests(unittest.TestCase):
                 },
             )
             outcome = evaluate_supervisor_status(repo=repo)
-            self.assertEqual(outcome["decision"], "needs_human")
+            self.assertEqual(outcome["decision"], "recovery")
             state = read_json(repo / "harness-state.json")
-            self.assertEqual(1, state["state"]["needs_human"])
+            self.assertEqual(1, state["state"]["recovery_requests"])
+            self.assertEqual("pending", state["state"]["recovery"]["status"])
+            self.assertEqual("planner", state["state"]["recovery"]["owner"])
+            self.assertEqual("T-001", state["state"]["recovery"]["resume_task_id"])
             self.assertEqual({}, state["state"]["active_tasks"])
             tasks = read_json(repo / "tasks.json")
             self.assertEqual("blocked", tasks["tasks"][0]["status"])
 
-    def test_worktree_needs_human_keeps_main_branch_untouched(self) -> None:
+    def test_worktree_recovery_request_keeps_main_branch_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = setup_repo(Path(tmp))
             initialize_run(
@@ -357,10 +360,13 @@ class HarnessFlowTests(unittest.TestCase):
                 },
             )
             outcome = evaluate_supervisor_status(repo=repo)
-            self.assertEqual(outcome["decision"], "needs_human")
+            self.assertEqual(outcome["decision"], "recovery")
 
             state = read_json(repo / "harness-state.json")
-            self.assertEqual(1, state["state"]["needs_human"])
+            self.assertEqual(1, state["state"]["recovery_requests"])
+            self.assertEqual("pending", state["state"]["recovery"]["status"])
+            self.assertEqual("planner", state["state"]["recovery"]["owner"])
+            self.assertEqual("T-001", state["state"]["recovery"]["resume_task_id"])
             self.assertEqual({}, state["state"]["active_tasks"])
             tasks = read_json(repo / "tasks.json")
             self.assertEqual("blocked", tasks["tasks"][0]["status"])

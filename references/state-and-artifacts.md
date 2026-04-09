@@ -20,6 +20,7 @@ Authority rules:
 
 - `tasks.json` is the canonical task graph.
 - `harness-state.json` is the canonical runtime snapshot.
+- `harness-state.json` and `harness-runtime.json` both carry recovery metadata for resume decisions.
 - `harness-events.tsv` is the append-only audit log.
 - `harness-lessons.md` is strategic cross-run memory.
 - `harness-runtime.log` is forensic trace only.

@@ -29,6 +29,7 @@ Purpose:
 - runtime status
 - pid/pgid
 - last control decision
+- recovery ownership and resume hints
 
 ## Run-Local Semantic State
 
@@ -42,6 +43,7 @@ Purpose:
 - canonical DAG
 - current role/task snapshot
 - append-only audit trail
+- recovery counters and resume context
 - isolated task workspaces while parallel implementers run
 
 ## Cross-Run Lessons

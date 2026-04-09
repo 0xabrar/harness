@@ -612,7 +612,7 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             self.assertEqual(runtime_payload["status"], "terminal")
             self.assertEqual(runtime_payload["terminal_reason"], "all_tasks_done")
 
-    def test_cherry_pick_conflict_escalates_runtime_to_needs_human(self) -> None:
+    def test_cherry_pick_conflict_moves_runtime_into_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             paths = default_paths(repo)
@@ -729,8 +729,10 @@ class TestRunRuntimeScheduling(unittest.TestCase):
 
             self.assertEqual(exit_code, 2)
             runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
-            self.assertEqual(runtime_payload["status"], "needs_human")
+            self.assertEqual(runtime_payload["status"], "recovery")
             self.assertIn("simulated cherry-pick conflict", runtime_payload["terminal_reason"])
+            self.assertEqual("pending", runtime_payload["recovery"]["status"])
+            self.assertEqual("runtime", runtime_payload["recovery"]["owner"])
 
     def test_complex_dag_with_parallel_fan_in_and_retry_reaches_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

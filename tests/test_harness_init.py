@@ -35,6 +35,8 @@ class HarnessInitTests(unittest.TestCase):
             self.assertEqual(state["config"]["goal"], "Build a harness")
             self.assertEqual(state["state"]["active_tasks"], {})
             self.assertEqual(state["state"]["planner_pending_reason"], "")
+            self.assertEqual(state["state"]["recovery_requests"], 0)
+            self.assertEqual(state["state"]["recovery"]["status"], "clear")
             self.assertEqual(state["state"]["seq"], 1)
 
             events = Path(result["events_path"]).read_text(encoding="utf-8")

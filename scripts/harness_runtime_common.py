@@ -8,6 +8,8 @@ from typing import Any
 from harness_artifacts import (
     HarnessError,
     Paths,
+    default_recovery_payload,
+    normalize_runtime_payload,
     read_json,
     utc_now,
     write_json_atomic,
@@ -17,7 +19,7 @@ from harness_artifacts import (
 def load_runtime(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    return read_json(path)
+    return normalize_runtime_payload(read_json(path))
 
 
 def pid_is_alive(pid: int | None) -> bool:
@@ -33,7 +35,7 @@ def pid_is_alive(pid: int | None) -> bool:
 
 
 def persist_runtime(path: Path, payload: dict[str, Any]) -> None:
-    updated = dict(payload)
+    updated = normalize_runtime_payload(payload)
     updated["updated_at"] = utc_now()
     write_json_atomic(path, updated)
 
@@ -57,7 +59,14 @@ def runtime_summary(paths: Paths) -> dict[str, Any]:
     payload = dict(runtime)
     payload["runtime_running"] = alive
     if payload.get("status") == "running" and not alive:
-        payload["status"] = "needs_human"
+        payload["status"] = "recovery"
         payload["terminal_reason"] = "runtime_process_missing"
+        payload["recovery"] = default_recovery_payload()
+        payload["recovery"].update(
+            {
+                "status": "pending",
+                "owner": "runtime",
+                "reason": "runtime_process_missing",
+            }
+        )
     return payload
-

@@ -20,6 +20,7 @@ from harness_artifacts import (
     all_tasks_done,
     build_launch_manifest,
     build_runtime_payload,
+    default_recovery_payload,
     default_paths,
     load_tasks,
     normalize_state_payload,
@@ -87,6 +88,37 @@ def _sorted_active_task_ids(tasks_payload: dict[str, Any], state_payload: dict[s
 def _ready_tasks_not_active(tasks_payload: dict[str, Any], state_payload: dict[str, Any]) -> list[dict[str, Any]]:
     active = _active_tasks(state_payload)
     return [task for task in all_ready_tasks(tasks_payload) if str(task["id"]) not in active]
+
+
+def _clear_runtime_recovery(runtime: dict[str, Any]) -> None:
+    runtime["recovery"] = default_recovery_payload()
+    runtime["last_error"] = ""
+
+
+def _set_runtime_recovery(
+    runtime: dict[str, Any],
+    *,
+    reason: str,
+    owner: str = "runtime",
+    resume_role: str = "",
+    resume_task_id: str = "",
+    resume_attempt: int = 0,
+) -> None:
+    recovery = default_recovery_payload()
+    recovery.update(
+        {
+            "status": "pending",
+            "owner": owner,
+            "reason": reason,
+            "resume_role": resume_role,
+            "resume_task_id": resume_task_id,
+            "resume_attempt": resume_attempt,
+        }
+    )
+    runtime["status"] = "recovery"
+    runtime["terminal_reason"] = reason
+    runtime["last_error"] = reason
+    runtime["recovery"] = recovery
 
 
 def _run_parallel_implementers(
@@ -328,6 +360,8 @@ def _persist_thread_id(paths: Paths, task_id: str, thread_id: str) -> None:
 def run_runtime(args: argparse.Namespace) -> int:
     paths = default_paths(args.repo)
     runtime = read_json(paths.runtime) if paths.runtime.exists() else build_runtime_payload(paths=paths, status="running")
+    runtime["status"] = "running"
+    runtime["terminal_reason"] = "none"
     persist_runtime(paths.runtime, runtime)
     launch = read_json(paths.launch)
     execution_policy = str(launch.get("config", {}).get("execution_policy") or DEFAULT_EXECUTION_POLICY)
@@ -340,8 +374,7 @@ def run_runtime(args: argparse.Namespace) -> int:
     while True:
         gate = evaluate_launch_context(repo=paths.repo, ignore_running_runtime=True)
         if gate["decision"] not in {"fresh", "resumable"}:
-            runtime["status"] = "needs_human"
-            runtime["terminal_reason"] = gate["reason"]
+            _set_runtime_recovery(runtime, reason=gate["reason"], resume_role="runtime")
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 2
@@ -365,6 +398,7 @@ def run_runtime(args: argparse.Namespace) -> int:
         if all_tasks_done(tasks_payload):
             runtime["status"] = "terminal"
             runtime["terminal_reason"] = "all_tasks_done"
+            _clear_runtime_recovery(runtime)
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 0
@@ -395,25 +429,37 @@ def run_runtime(args: argparse.Namespace) -> int:
                 with supervisor_lock:
                     decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
             except (HarnessError, AppServerError, OSError) as exc:
-                runtime["status"] = "needs_human"
-                runtime["terminal_reason"] = str(exc)
+                _set_runtime_recovery(
+                    runtime,
+                    reason=str(exc),
+                    resume_role="verifier",
+                    resume_task_id=task_id,
+                    resume_attempt=int(record.get("attempt") or 0),
+                )
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
 
             runtime["last_decision"] = decision["decision"]
             runtime["last_reason"] = decision["reason"]
+            _clear_runtime_recovery(runtime)
             persist_runtime(paths.runtime, runtime)
 
             if decision["decision"] == "stop":
                 runtime["status"] = "terminal"
                 runtime["terminal_reason"] = decision["reason"]
+                _clear_runtime_recovery(runtime)
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 0
-            if decision["decision"] == "needs_human":
-                runtime["status"] = "needs_human"
-                runtime["terminal_reason"] = decision["reason"]
+            if decision["decision"] == "recovery":
+                _set_runtime_recovery(
+                    runtime,
+                    reason=decision["reason"],
+                    owner="planner",
+                    resume_role="planner",
+                    resume_task_id=task_id,
+                )
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
@@ -441,25 +487,25 @@ def run_runtime(args: argparse.Namespace) -> int:
                 with supervisor_lock:
                     decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
             except (HarnessError, AppServerError, OSError) as exc:
-                runtime["status"] = "needs_human"
-                runtime["terminal_reason"] = str(exc)
+                _set_runtime_recovery(runtime, reason=str(exc), resume_role="planner")
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
 
             runtime["last_decision"] = decision["decision"]
             runtime["last_reason"] = decision["reason"]
+            _clear_runtime_recovery(runtime)
             persist_runtime(paths.runtime, runtime)
 
             if decision["decision"] == "stop":
                 runtime["status"] = "terminal"
                 runtime["terminal_reason"] = decision["reason"]
+                _clear_runtime_recovery(runtime)
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 0
-            if decision["decision"] == "needs_human":
-                runtime["status"] = "needs_human"
-                runtime["terminal_reason"] = decision["reason"]
+            if decision["decision"] == "recovery":
+                _set_runtime_recovery(runtime, reason=decision["reason"], owner="planner", resume_role="planner")
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
@@ -503,8 +549,14 @@ def run_runtime(args: argparse.Namespace) -> int:
                     for task in batch_tasks:
                         task_id = str(task["id"])
                         if task_id in errors:
-                            runtime["status"] = "needs_human"
-                            runtime["terminal_reason"] = errors[task_id]
+                            record = _active_tasks(state_payload).get(task_id, {})
+                            _set_runtime_recovery(
+                                runtime,
+                                reason=errors[task_id],
+                                resume_role="implementer",
+                                resume_task_id=task_id,
+                                resume_attempt=int(record.get("attempt") or 0),
+                            )
                             persist_runtime(paths.runtime, runtime)
                             manager.shutdown()
                             return 2
@@ -526,6 +578,7 @@ def run_runtime(args: argparse.Namespace) -> int:
                             decision = evaluate_supervisor_status(repo=paths.repo, report_override=results[task_id]["report"])
                     runtime["last_decision"] = decision["decision"]
                     runtime["last_reason"] = decision["reason"]
+                    _clear_runtime_recovery(runtime)
                     persist_runtime(paths.runtime, runtime)
                 else:
                     task = batch_tasks[0]
@@ -575,10 +628,19 @@ def run_runtime(args: argparse.Namespace) -> int:
                     runtime["last_decision"] = decision["decision"]
                     runtime["last_reason"] = decision["reason"]
                     runtime["last_task_id"] = task_id
+                    _clear_runtime_recovery(runtime)
                     persist_runtime(paths.runtime, runtime)
             except (HarnessError, AppServerError, OSError) as exc:
-                runtime["status"] = "needs_human"
-                runtime["terminal_reason"] = str(exc)
+                active = _active_tasks(state_payload)
+                task_id = implementer_ids[0] if implementer_ids else ""
+                record = active.get(task_id, {})
+                _set_runtime_recovery(
+                    runtime,
+                    reason=str(exc),
+                    resume_role="implementer",
+                    resume_task_id=task_id,
+                    resume_attempt=int(record.get("attempt") or 0),
+                )
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
@@ -586,12 +648,12 @@ def run_runtime(args: argparse.Namespace) -> int:
             if decision["decision"] == "stop":
                 runtime["status"] = "terminal"
                 runtime["terminal_reason"] = decision["reason"]
+                _clear_runtime_recovery(runtime)
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 0
-            if decision["decision"] == "needs_human":
-                runtime["status"] = "needs_human"
-                runtime["terminal_reason"] = decision["reason"]
+            if decision["decision"] == "recovery":
+                _set_runtime_recovery(runtime, reason=decision["reason"], owner="planner", resume_role="planner")
                 persist_runtime(paths.runtime, runtime)
                 manager.shutdown()
                 return 2
@@ -603,6 +665,7 @@ def run_runtime(args: argparse.Namespace) -> int:
         if all_tasks_done(tasks_payload):
             runtime["status"] = "terminal"
             runtime["terminal_reason"] = "all_tasks_done"
+            _clear_runtime_recovery(runtime)
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 0
@@ -623,25 +686,25 @@ def run_runtime(args: argparse.Namespace) -> int:
             with supervisor_lock:
                 decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
         except (HarnessError, AppServerError, OSError) as exc:
-            runtime["status"] = "needs_human"
-            runtime["terminal_reason"] = str(exc)
+            _set_runtime_recovery(runtime, reason=str(exc), resume_role="planner")
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 2
 
         runtime["last_decision"] = decision["decision"]
         runtime["last_reason"] = decision["reason"]
+        _clear_runtime_recovery(runtime)
         persist_runtime(paths.runtime, runtime)
 
         if decision["decision"] == "stop":
             runtime["status"] = "terminal"
             runtime["terminal_reason"] = decision["reason"]
+            _clear_runtime_recovery(runtime)
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 0
-        if decision["decision"] == "needs_human":
-            runtime["status"] = "needs_human"
-            runtime["terminal_reason"] = decision["reason"]
+        if decision["decision"] == "recovery":
+            _set_runtime_recovery(runtime, reason=decision["reason"], owner="planner", resume_role="planner")
             persist_runtime(paths.runtime, runtime)
             manager.shutdown()
             return 2
@@ -658,7 +721,8 @@ def stop_runtime(args: argparse.Namespace) -> dict[str, Any]:
             os.killpg(int(pgid), signal.SIGTERM)
         except ProcessLookupError:
             pass
-    runtime["status"] = "stopped"
+    runtime["status"] = "terminal"
     runtime["terminal_reason"] = "user_stopped"
+    _clear_runtime_recovery(runtime)
     persist_runtime(paths.runtime, runtime)
-    return {"status": "stopped", "runtime_path": str(paths.runtime), "pid": pid, "pgid": pgid}
+    return {"status": "terminal", "runtime_path": str(paths.runtime), "pid": pid, "pgid": pgid}

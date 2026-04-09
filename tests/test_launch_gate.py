@@ -40,6 +40,20 @@ class LaunchGateTests(unittest.TestCase):
             decision = evaluate_launch_context(repo=tmp)
             self.assertEqual(decision["decision"], "resumable")
 
+    def test_missing_launch_manifest_enters_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            initialize_run(
+                repo=tmp,
+                goal="Build a harness",
+                scope=".",
+                session_mode="background",
+                execution_policy="danger_full_access",
+                force=True,
+            )
+            decision = evaluate_launch_context(repo=tmp)
+            self.assertEqual(decision["decision"], "recovery")
+            self.assertEqual(decision["reason"], "launch_manifest_missing")
+
 
 if __name__ == "__main__":
     unittest.main()

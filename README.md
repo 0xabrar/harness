@@ -63,20 +63,20 @@ Each role runs as a separate Codex turn with an isolated context window and retu
 |---|---|---|
 | **Planner** | Reads the repo, creates/updates `plan.md` and `tasks.json` | Cannot write product code |
 | **Implementer** | Works one task, makes code changes, creates a trial commit | Cannot edit `tasks.json` |
-| **Verifier** | Evaluates the trial commit against acceptance criteria | Cannot modify code; returns `accept`, `revert`, or `needs_human` |
+| **Verifier** | Evaluates the trial commit against acceptance criteria | Cannot modify code; returns `accept` or `revert`, and may request recovery when verification is ambiguous |
 
 The runtime itself is not an LLM — it's a Python script that reads reports, applies verdicts, and decides which role runs next. If multiple independent tasks are ready, implementers run in parallel in isolated Git worktrees. Accepted task commits are cherry-picked back onto the main branch so the final history stays linear. If a task is rejected, the task worktree is reset for retry and main stays untouched.
 
-## Expected `needs_human`
+## Recovery Mode
 
-`needs_human` is still expected in some cases. The main ones are:
+When the harness cannot continue its normal loop, it records recovery context instead of treating the run as a normal terminal outcome. Typical recovery cases today are:
 
 - acceptance criteria are ambiguous or under-specified
 - the environment blocks a verification command
-- an accepted task commit cannot be cherry-picked cleanly onto main
+- an accepted task commit cannot be integrated cleanly onto main
 - the repo is in an inconsistent state the runtime should not repair automatically
 
-In those cases the harness should stop cleanly with enough state and reports for a human to decide the next step.
+In those cases `harness-runtime.json` and `harness-state.json` record recovery ownership, reason, and resume hints so the next run can continue from an explicit recovery point.
 
 ## What It Writes
 
@@ -86,10 +86,10 @@ The harness writes these files into the target repo:
 |---|---|
 | `tasks.json` | Canonical task DAG |
 | `plan.md` | Human-readable plan |
-| `harness-state.json` | Current run snapshot (active tasks, planner intent, counters) |
+| `harness-state.json` | Current run snapshot (active tasks, planner intent, counters, recovery state) |
 | `harness-events.tsv` | Append-only audit log |
 | `harness-launch.json` | Launch config (goal, scope, policy) |
-| `harness-runtime.json` | Runtime status (PID, last decision) |
+| `harness-runtime.json` | Runtime status (PID, last decision, recovery status) |
 | `harness-runtime.log` | Stdout/stderr from the background process |
 | `harness-servers.json` | App-server PIDs for crash recovery |
 | `harness-lessons.md` | Cross-run strategic memory |

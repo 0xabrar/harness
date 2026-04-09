@@ -12,6 +12,7 @@ from harness_artifacts import (
     append_event,
     all_tasks_done,
     all_ready_tasks,
+    default_recovery_payload,
     default_paths,
     load_tasks,
     normalize_state_payload,
@@ -29,6 +30,33 @@ from harness_task_worktree import cherry_pick_commit, git_head, remove_task_work
 
 def _active_tasks(state_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return normalize_state_payload(state_payload)["state"]["active_tasks"]
+
+
+def _clear_recovery(state_payload: dict[str, Any]) -> None:
+    normalize_state_payload(state_payload)["state"]["recovery"] = default_recovery_payload()
+
+
+def _set_recovery(
+    state_payload: dict[str, Any],
+    *,
+    owner: str,
+    reason: str,
+    resume_role: str = "",
+    resume_task_id: str = "",
+    resume_attempt: int = 0,
+) -> None:
+    recovery = default_recovery_payload()
+    recovery.update(
+        {
+            "status": "pending",
+            "owner": owner,
+            "reason": reason,
+            "resume_role": resume_role,
+            "resume_task_id": resume_task_id,
+            "resume_attempt": resume_attempt,
+        }
+    )
+    normalize_state_payload(state_payload)["state"]["recovery"] = recovery
 
 
 def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
@@ -124,18 +152,27 @@ def planner_report_state(paths, state_payload: dict[str, Any], tasks_payload: di
     tasks_payload = refresh_ready_tasks(tasks_payload)
     if all_tasks_done(tasks_payload):
         state_payload["state"]["completed"] = True
+        _clear_recovery(state_payload)
         return {"decision": "stop", "reason": "all_tasks_done", "report": report, "tasks": tasks_payload}
 
     ready_tasks = _ready_tasks_not_active(tasks_payload, state_payload)
     if not ready_tasks:
-        state_payload["state"]["needs_human"] += 1
+        state_payload["state"]["last_status"] = "recovery"
+        state_payload["state"]["recovery_requests"] += 1
+        _set_recovery(
+            state_payload,
+            owner="planner",
+            reason="planner_left_no_ready_tasks",
+            resume_role="planner",
+        )
         return {
-            "decision": "needs_human",
+            "decision": "recovery",
             "reason": "planner_left_no_ready_tasks",
             "report": report,
             "tasks": tasks_payload,
         }
 
+    _clear_recovery(state_payload)
     active = _active_tasks(state_payload)
     for task in ready_tasks:
         active[str(task["id"])] = {
@@ -201,6 +238,7 @@ def implementer_report_state(paths, state_payload: dict[str, Any], tasks_payload
 
     state_payload["state"]["implementer_runs"] += 1
     state_payload["state"]["last_status"] = "submit_trial"
+    _clear_recovery(state_payload)
     return {"decision": "relaunch", "reason": "dispatch_verifier", "report": report, "tasks": tasks_payload}
 
 
@@ -247,9 +285,10 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
 
     state_payload["state"]["verifier_runs"] += 1
     state_payload["state"]["last_verdict"] = verdict
-    state_payload["state"]["last_status"] = verdict
+    state_payload["state"]["last_status"] = "recovery" if verdict == "needs_human" else verdict
 
     if verdict == "accept":
+        _clear_recovery(state_payload)
         integrated_commit = commit
         if str(record.get("worktree_path") or ""):
             integrated_commit = cherry_pick_commit(repo=paths.repo, commit=commit)
@@ -295,11 +334,20 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
     if verdict == "needs_human":
         task["status"] = "blocked"
         task["blocked_reason"] = summary
-        state_payload["state"]["needs_human"] += 1
+        state_payload["state"]["recovery_requests"] += 1
         state_payload["state"]["blocked"] += 1
         active.pop(task_id, None)
-        return {"decision": "needs_human", "reason": "verifier_escalated", "report": report, "tasks": tasks_payload}
+        _set_recovery(
+            state_payload,
+            owner="planner",
+            reason=summary,
+            resume_role="planner",
+            resume_task_id=task_id,
+            resume_attempt=attempt,
+        )
+        return {"decision": "recovery", "reason": "verifier_escalated", "report": report, "tasks": tasks_payload}
 
+    _clear_recovery(state_payload)
     if str(record.get("worktree_path") or ""):
         next_base = git_head(paths.repo)
         reset_task_worktree(

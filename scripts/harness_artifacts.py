@@ -15,7 +15,8 @@ ARTIFACT_VERSION = 1
 EVENT_HEADER = ["seq", "timestamp", "role", "task_id", "attempt", "commit", "status", "decision", "description"]
 ROLE_CHOICES = ("planner", "implementer", "verifier")
 TASK_STATUS_CHOICES = ("pending", "ready", "in_progress", "blocked", "done", "failed")
-RUNTIME_STATUS_CHOICES = ("idle", "running", "stopped", "terminal", "needs_human")
+RUNTIME_STATUS_CHOICES = ("idle", "running", "recovery", "terminal")
+RECOVERY_STATUS_CHOICES = ("clear", "pending")
 DEFAULT_EXECUTION_POLICY = "danger_full_access"
 
 
@@ -124,6 +125,34 @@ def initial_plan_text(goal: str) -> str:
     return f"# Plan\n\nGoal: {goal}\n"
 
 
+def default_recovery_payload() -> dict[str, Any]:
+    return {
+        "status": "clear",
+        "owner": "",
+        "reason": "",
+        "resume_role": "",
+        "resume_task_id": "",
+        "resume_attempt": 0,
+    }
+
+
+def normalize_recovery_payload(payload: Any) -> dict[str, Any]:
+    recovery = deepcopy(payload) if isinstance(payload, dict) else {}
+    normalized = default_recovery_payload()
+    normalized["status"] = str(recovery.get("status") or normalized["status"])
+    normalized["owner"] = str(recovery.get("owner") or "")
+    normalized["reason"] = str(recovery.get("reason") or "")
+    normalized["resume_role"] = str(recovery.get("resume_role") or "")
+    normalized["resume_task_id"] = str(recovery.get("resume_task_id") or "")
+    try:
+        normalized["resume_attempt"] = int(recovery.get("resume_attempt") or 0)
+    except (TypeError, ValueError):
+        normalized["resume_attempt"] = 0
+    if normalized["status"] not in RECOVERY_STATUS_CHOICES:
+        normalized["status"] = "clear"
+    return normalized
+
+
 def build_state_payload(*, config: dict[str, Any], run_tag: str | None = None) -> dict[str, Any]:
     return {
         "version": ARTIFACT_VERSION,
@@ -146,7 +175,8 @@ def build_state_payload(*, config: dict[str, Any], run_tag: str | None = None) -
             "reverts": 0,
             "replans": 0,
             "blocked": 0,
-            "needs_human": 0,
+            "recovery_requests": 0,
+            "recovery": default_recovery_payload(),
             "completed": False,
         },
         "updated_at": utc_now(),
@@ -159,6 +189,32 @@ def normalize_state_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(state.get("active_tasks"), dict):
         state["active_tasks"] = {}
     state.setdefault("planner_pending_reason", "")
+    state.setdefault("accepted_commit", "")
+    state.setdefault("last_status", "initialized")
+    if str(state.get("last_status") or "") == "needs_human":
+        state["last_status"] = "recovery"
+    state.setdefault("last_decision", "initialize")
+    state.setdefault("last_verdict", "")
+    state.setdefault("planner_runs", 0)
+    state.setdefault("implementer_runs", 0)
+    state.setdefault("verifier_runs", 0)
+    state.setdefault("accepts", 0)
+    state.setdefault("reverts", 0)
+    state.setdefault("replans", 0)
+    state.setdefault("blocked", 0)
+    legacy_needs_human = state.pop("needs_human", None)
+    if "recovery_requests" not in state:
+        try:
+            state["recovery_requests"] = int(legacy_needs_human or 0)
+        except (TypeError, ValueError):
+            state["recovery_requests"] = 0
+    else:
+        try:
+            state["recovery_requests"] = int(state.get("recovery_requests") or 0)
+        except (TypeError, ValueError):
+            state["recovery_requests"] = 0
+    state["recovery"] = normalize_recovery_payload(state.get("recovery"))
+    state.setdefault("completed", False)
     for legacy_key in ("current_role", "current_task_id", "current_attempt", "trial_commit"):
         state.pop(legacy_key, None)
     return state_payload
@@ -207,6 +263,7 @@ def build_runtime_payload(*, paths: Paths, status: str, pid: int | None = None, 
         "pid": pid,
         "pgid": pgid,
         "command": list(command or []),
+        "recovery": default_recovery_payload(),
         "last_decision": "",
         "last_reason": "",
         "last_error": "",
@@ -215,6 +272,37 @@ def build_runtime_payload(*, paths: Paths, status: str, pid: int | None = None, 
         "created_at": now,
         "updated_at": now,
     }
+
+
+def normalize_runtime_payload(runtime_payload: dict[str, Any]) -> dict[str, Any]:
+    payload = deepcopy(runtime_payload)
+    status = str(payload.get("status") or "idle")
+    if status == "needs_human":
+        status = "recovery"
+    elif status == "stopped":
+        status = "terminal"
+        if str(payload.get("terminal_reason") or "none") == "none":
+            payload["terminal_reason"] = "user_stopped"
+    if status not in RUNTIME_STATUS_CHOICES:
+        status = "idle"
+    payload["status"] = status
+    payload["terminal_reason"] = str(payload.get("terminal_reason") or "none")
+    payload["last_decision"] = str(payload.get("last_decision") or "")
+    payload["last_reason"] = str(payload.get("last_reason") or "")
+    payload["last_error"] = str(payload.get("last_error") or "")
+    payload["last_role"] = str(payload.get("last_role") or "")
+    payload["last_task_id"] = str(payload.get("last_task_id") or "")
+    payload["recovery"] = normalize_recovery_payload(payload.get("recovery"))
+    if payload["status"] == "recovery" and payload["recovery"]["status"] == "clear":
+        payload["recovery"] = default_recovery_payload()
+        payload["recovery"].update(
+            {
+                "status": "pending",
+                "owner": "runtime",
+                "reason": str(payload.get("terminal_reason") or payload.get("last_reason") or ""),
+            }
+        )
+    return payload
 
 
 def ensure_events_file(path: Path) -> None:

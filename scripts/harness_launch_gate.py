@@ -43,7 +43,7 @@ def evaluate_launch_context(*, repo: str | Path | None = None, ignore_running_ru
     if not launch_exists:
         reasons.append("Existing harness artifacts were found but harness-launch.json is missing.")
         return {
-            "decision": "needs_human",
+            "decision": "recovery",
             "reason": "launch_manifest_missing",
             "runtime_running": False,
             "paths": {key: str(value) for key, value in paths.__dict__.items()},
@@ -58,7 +58,7 @@ def evaluate_launch_context(*, repo: str | Path | None = None, ignore_running_ru
             load_tasks(paths.tasks)
     except HarnessError as exc:
         return {
-            "decision": "needs_human",
+            "decision": "recovery",
             "reason": "invalid_artifact",
             "runtime_running": False,
             "paths": {key: str(value) for key, value in paths.__dict__.items()},
@@ -77,7 +77,7 @@ def evaluate_launch_context(*, repo: str | Path | None = None, ignore_running_ru
             if not exists
         ]
         return {
-            "decision": "needs_human",
+            "decision": "recovery",
             "reason": "incomplete_artifacts",
             "runtime_running": False,
             "paths": {key: str(value) for key, value in paths.__dict__.items()},
@@ -110,4 +110,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

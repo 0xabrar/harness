@@ -100,7 +100,7 @@ The background runtime loops autonomously:
 3. Sends a turn to Codex via the app-server JSON-RPC protocol.
 4. Receives the structured report via `outputSchema`.
 5. Applies supervisor transitions (accept/cherry-pick, retry/reset, replan, dispatch next role).
-6. Repeats until all tasks are done or it reaches `needs_human`.
+6. Repeats until all tasks are done or it enters recovery.
 
 If `tasks.json` already has `ready` tasks, the runtime skips the initial planner turn and goes directly to the implementer.
 
@@ -114,7 +114,7 @@ python3 scripts/harness_runtime_ctl.py status --repo <repo>
 ```
 
 Present the result to the user. Highlight:
-- Current status (running / stopped / needs_human / terminal)
+- Current status (`running` / `recovery` / `terminal` / `idle`)
 - Last role and task
 - Last decision and reason
 - Whether the runtime process is still alive
@@ -130,7 +130,7 @@ Run:
 python3 scripts/harness_runtime_ctl.py stop --repo <repo>
 ```
 
-Confirm to the user that the runtime was stopped.
+Confirm to the user that the runtime was halted and note the terminal reason if available.
 
 ---
 
@@ -157,17 +157,17 @@ Confirm to the user that the runtime was stopped.
 2. User launches with `$harness run` (run mode).
 3. Background runtime: implementer works a ready task → verifier evaluates → runtime applies verdict → repeat.
 4. Runtime re-invokes the planner when: tasks need replanning, proposals are pending, or no ready tasks remain.
-5. Loop ends when all tasks are done or the runtime reaches `needs_human`.
+5. Loop ends when all tasks are done or the runtime enters recovery.
 
 ## Hard Rules
 
 1. The planner is the only role allowed to change task topology in `tasks.json` (add/split/reprioritize/close tasks).
 2. The implementer is the only role allowed to write product code.
 3. The verifier must evaluate the exact trial commit, not a mutable working tree or the post-integration main branch.
-4. The verifier returns only `accept`, `revert`, or `needs_human`.
+4. The verifier returns only `accept` or `revert`, and ambiguous verification should be surfaced as recovery rather than normal progress.
 5. The runtime may update execution-state fields for the current task (`in_progress`, `in_review`, `done`, `ready`, `blocked`) when applying verifier verdicts, but it does not invent product work or change DAG topology.
 6. All role-to-role communication happens through artifacts in the target repo.
-7. `needs_human` is a safety valve, not a normal step in the loop.
+7. Recovery is a safety valve, not a normal step in the loop.
 8. Use helper scripts for state/event/lessons updates whenever possible.
 9. The background runtime executes as fresh role turns via the app-server protocol. Foreground/manual same-session runs are unsupported.
 
