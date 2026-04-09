@@ -65,23 +65,38 @@ def evaluate_launch_context(*, repo: str | Path | None = None, ignore_running_ru
             "reasons": [str(exc)],
         }
 
-    if not all((state_exists, tasks_exists, plan_exists, events_exists)):
-        missing = [
-            name
-            for name, exists in (
-                ("harness-state.json", state_exists),
-                ("tasks.json", tasks_exists),
-                ("plan.md", plan_exists),
-                ("harness-events.tsv", events_exists),
-            )
-            if not exists
-        ]
+    missing_core = [
+        name
+        for name, exists in (
+            ("tasks.json", tasks_exists),
+            ("plan.md", plan_exists),
+        )
+        if not exists
+    ]
+    if missing_core:
         return {
             "decision": "recovery",
             "reason": "incomplete_artifacts",
             "runtime_running": False,
             "paths": {key: str(value) for key, value in paths.__dict__.items()},
-            "reasons": [f"Incomplete harness artifacts: {', '.join(missing)}"],
+            "reasons": [f"Incomplete harness artifacts: {', '.join(missing_core)}"],
+        }
+
+    missing_bootstrap = [
+        name
+        for name, exists in (
+            ("harness-state.json", state_exists),
+            ("harness-events.tsv", events_exists),
+        )
+        if not exists
+    ]
+    if missing_bootstrap:
+        return {
+            "decision": "resumable",
+            "reason": "bootstrap_missing_run_local_artifacts",
+            "runtime_running": runtime_running,
+            "paths": {key: str(value) for key, value in paths.__dict__.items()},
+            "reasons": [f"Bootstrap missing harness artifacts: {', '.join(missing_bootstrap)}"],
         }
 
     return {

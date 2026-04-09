@@ -18,12 +18,15 @@ from harness_artifacts import (
     Paths,
     all_ready_tasks,
     all_tasks_done,
+    build_state_payload,
     build_launch_manifest,
     build_runtime_payload,
     default_recovery_payload,
     default_paths,
+    ensure_events_file,
     load_tasks,
     normalize_state_payload,
+    parse_events,
     read_json,
     refresh_ready_tasks,
     task_index,
@@ -71,6 +74,28 @@ def _active_tasks(state_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _write_state_payload(paths: Paths, state_payload: dict[str, Any]) -> None:
     state_payload["updated_at"] = utc_now()
     write_json_atomic(paths.state, state_payload)
+
+
+def _bootstrap_missing_run_artifacts(paths: Paths, launch: dict[str, Any]) -> list[str]:
+    created: list[str] = []
+    config = dict(launch.get("config") or {})
+
+    if not paths.events.exists():
+        ensure_events_file(paths.events)
+        created.append("harness-events.tsv")
+
+    if not paths.state.exists():
+        state_payload = build_state_payload(config=config, run_tag="")
+        existing_events = parse_events(paths.events)
+        if existing_events:
+            try:
+                state_payload["state"]["seq"] = max(int(row.get("seq") or 0) for row in existing_events)
+            except ValueError:
+                state_payload["state"]["seq"] = len(existing_events)
+        write_json_atomic(paths.state, state_payload)
+        created.append("harness-state.json")
+
+    return created
 
 
 def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
@@ -298,6 +323,7 @@ def start_runtime(args: argparse.Namespace, *, runner_path: Path) -> dict[str, A
             max_task_attempts=int(launch.get("config", {}).get("max_task_attempts") or 3),
             force=False,
         )
+    _bootstrap_missing_run_artifacts(paths, launch)
 
     command = [
         sys.executable,
@@ -365,6 +391,7 @@ def run_runtime(args: argparse.Namespace) -> int:
     persist_runtime(paths.runtime, runtime)
     launch = read_json(paths.launch)
     execution_policy = str(launch.get("config", {}).get("execution_policy") or DEFAULT_EXECUTION_POLICY)
+    _bootstrap_missing_run_artifacts(paths, launch)
 
     codex_bin = getattr(args, "codex_bin", "codex")
     manager = ServerManager(cwd=str(paths.repo), state_dir=str(paths.repo), codex_bin=codex_bin)
@@ -390,6 +417,7 @@ def run_runtime(args: argparse.Namespace) -> int:
                 max_task_attempts=int(launch.get("config", {}).get("max_task_attempts") or 3),
                 force=False,
             )
+        _bootstrap_missing_run_artifacts(paths, launch)
 
         state_payload = normalize_state_payload(read_json(paths.state))
         tasks_payload = refresh_ready_tasks(load_tasks(paths.tasks))

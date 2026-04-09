@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from harness_artifacts import build_launch_manifest, default_paths, write_json_atomic  # noqa: E402
+from harness_artifacts import build_launch_manifest, default_paths, write_json_atomic, write_tasks  # noqa: E402
 from harness_init_run import initialize_run  # noqa: E402
 from harness_launch_gate import evaluate_launch_context  # noqa: E402
 
@@ -53,6 +53,37 @@ class LaunchGateTests(unittest.TestCase):
             decision = evaluate_launch_context(repo=tmp)
             self.assertEqual(decision["decision"], "recovery")
             self.assertEqual(decision["reason"], "launch_manifest_missing")
+
+    def test_missing_state_and_events_with_plan_artifacts_is_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = default_paths(tmp)
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Resume from plan artifacts",
+                    prompt_text="Resume from plan artifacts",
+                    config={"goal": "Resume from plan artifacts", "scope": ".", "session_mode": "background"},
+                ),
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Resume from plan artifacts",
+                    "planner_revision": 1,
+                    "tasks": [],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+            paths.plan.write_text("# Plan\n", encoding="utf-8")
+
+            decision = evaluate_launch_context(repo=tmp)
+
+            self.assertEqual(decision["decision"], "resumable")
+            self.assertEqual(decision["reason"], "bootstrap_missing_run_local_artifacts")
+            self.assertIn("harness-state.json", decision["reasons"][0])
+            self.assertIn("harness-events.tsv", decision["reasons"][0])
 
 
 if __name__ == "__main__":

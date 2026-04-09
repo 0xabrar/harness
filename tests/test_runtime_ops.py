@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 from harness_app_server import AppServerError
 from harness_artifacts import HarnessError, build_launch_manifest, default_paths, write_json_atomic, write_tasks
 from harness_init_run import initialize_run
-from harness_runtime_ops import run_role_turn, run_runtime, sandbox_for_role
+from harness_runtime_ops import run_role_turn, run_runtime, sandbox_for_role, start_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +470,172 @@ class TestThreadResume(unittest.TestCase):
 
 
 class TestRunRuntimeScheduling(unittest.TestCase):
+    def test_run_runtime_bootstraps_missing_state_and_events_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = default_paths(repo)
+
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Bootstrap missing run artifacts",
+                    prompt_text=None,
+                    config={
+                        "goal": "Bootstrap missing run artifacts",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 2,
+                    },
+                ),
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Bootstrap missing run artifacts",
+                    "planner_revision": 1,
+                    "tasks": [
+                        {
+                            "id": "T-001",
+                            "title": "Task T-001",
+                            "description": "Only task",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        }
+                    ],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+            paths.plan.write_text("# Plan\n", encoding="utf-8")
+
+            dispatch_checks: list[tuple[str, str]] = []
+
+            def fake_run_role_turn(*, role: str, task_id: str, **kwargs: Any) -> dict[str, Any]:
+                dispatch_checks.append((role, task_id))
+                self.assertTrue(paths.state.exists())
+                self.assertTrue(paths.events.exists())
+                if role == "implementer":
+                    return {
+                        "report": {
+                            "role": "implementer",
+                            "task_id": task_id,
+                            "attempt": 1,
+                            "commit": "commit-T-001",
+                            "summary": "implemented",
+                            "files_changed": ["task.txt"],
+                            "checks_run": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": "thread-T-001",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+                return {
+                    "report": {
+                        "role": "verifier",
+                        "task_id": task_id,
+                        "attempt": 1,
+                        "commit": "commit-T-001",
+                        "verdict": "accept",
+                        "summary": "verified",
+                        "findings": [],
+                        "criteria_results": [],
+                        "proposed_tasks": [],
+                    },
+                    "thread_id": "verify-T-001",
+                    "turn_result": {},
+                    "parse_error": None,
+                }
+
+            class FakeServerManager:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+
+                def kill_orphans(self) -> None:
+                    return None
+
+                def shutdown(self) -> None:
+                    return None
+
+            def fake_prepare_task_worktree(*, task_id: str, **kwargs: Any) -> dict[str, str]:
+                worktree = repo / f"worktree-{task_id}"
+                worktree.mkdir(exist_ok=True)
+                return {
+                    "branch_name": f"branch-{task_id}",
+                    "worktree_path": str(worktree),
+                    "base_commit": "base-commit",
+                }
+
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
+                "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
+            ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
+                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+            ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
+                "harness_runtime_ops.time.sleep", return_value=None
+            ):
+                exit_code = run_runtime(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(dispatch_checks, [("implementer", "T-001"), ("verifier", "T-001")])
+            self.assertTrue(paths.state.exists())
+            self.assertTrue(paths.events.exists())
+
+    def test_start_runtime_bootstraps_missing_state_and_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = default_paths(repo)
+
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Bootstrap before spawn",
+                    prompt_text=None,
+                    config={
+                        "goal": "Bootstrap before spawn",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 2,
+                    },
+                ),
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Bootstrap before spawn",
+                    "planner_revision": 1,
+                    "tasks": [],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+            paths.plan.write_text("# Plan\n", encoding="utf-8")
+
+            dummy_process = MagicMock()
+            dummy_process.pid = 12345
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            with patch("harness_runtime_ops.command_is_executable", return_value=True), patch(
+                "harness_runtime_ops.subprocess.Popen", return_value=dummy_process
+            ), patch("harness_runtime_ops.os.getpgid", return_value=12345):
+                result = start_runtime(args, runner_path=Path("/tmp/fake-runner.py"))
+
+            self.assertEqual(result["status"], "running")
+            self.assertTrue(paths.state.exists())
+            self.assertTrue(paths.events.exists())
+
     def test_multiple_ready_tasks_run_one_implementer_turn_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
