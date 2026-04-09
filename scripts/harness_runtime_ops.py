@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from harness_app_server import AppServerError, ServerManager
 from harness_artifacts import (
@@ -25,6 +25,7 @@ from harness_artifacts import (
     default_paths,
     ensure_events_file,
     load_tasks,
+    normalize_recovery_payload,
     normalize_state_payload,
     parse_events,
     read_json,
@@ -59,6 +60,28 @@ _POLICY_SANDBOX: dict[str, dict[str, str]] = {
         "verifier": "read-only",
     },
 }
+
+_RUNTIME_RETRY_LIMIT = 1
+
+
+class RuntimeRetryExhausted(HarnessError):
+    """Raised when a retryable runtime fault exceeds the in-process retry budget."""
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        resume_role: str,
+        resume_task_id: str,
+        resume_attempt: int,
+        cause: BaseException,
+    ) -> None:
+        super().__init__(str(cause))
+        self.reason = reason
+        self.resume_role = resume_role
+        self.resume_task_id = resume_task_id
+        self.resume_attempt = resume_attempt
+        self.cause = cause
 
 
 def sandbox_for_role(role: str, execution_policy: str = "danger_full_access") -> str:
@@ -144,6 +167,142 @@ def _set_runtime_recovery(
     runtime["terminal_reason"] = reason
     runtime["last_error"] = reason
     runtime["recovery"] = recovery
+
+
+def _record_runtime_retry(
+    paths: Paths,
+    runtime: dict[str, Any],
+    *,
+    reason: str,
+    error_message: str,
+    resume_role: str,
+    resume_task_id: str,
+    resume_attempt: int,
+    exhausted: bool = False,
+    retry_count_override: int | None = None,
+) -> int:
+    state_payload = normalize_state_payload(read_json(paths.state))
+    existing = normalize_recovery_payload(state_payload["state"].get("recovery"))
+    same_retry = (
+        str(existing.get("owner") or "") == "runtime"
+        and str(existing["retry"].get("reason") or "") == reason
+        and str(existing["retry"].get("resume_role") or "") == resume_role
+        and str(existing["retry"].get("resume_task_id") or "") == resume_task_id
+        and int(existing["retry"].get("resume_attempt") or 0) == int(resume_attempt or 0)
+    )
+    retry_count = retry_count_override
+    if retry_count is None:
+        retry_count = (int(existing["retry"].get("count") or 0) if same_retry else 0) + 1
+
+    recovery = default_recovery_payload()
+    recovery.update(
+        {
+            "status": "pending",
+            "owner": "runtime",
+            "reason": reason,
+            "resume_role": resume_role,
+            "resume_task_id": resume_task_id,
+            "resume_attempt": resume_attempt,
+        }
+    )
+    recovery["retry"].update(
+        {
+            "count": retry_count,
+            "reason": reason,
+            "resume_role": resume_role,
+            "resume_task_id": resume_task_id,
+            "resume_attempt": resume_attempt,
+        }
+    )
+
+    state_payload["state"]["last_status"] = "recovery"
+    state_payload["state"]["recovery"] = recovery
+    _write_state_payload(paths, state_payload)
+
+    runtime["status"] = "recovery" if exhausted else "running"
+    runtime["terminal_reason"] = error_message if exhausted else "none"
+    runtime["last_decision"] = "recovery" if exhausted else "runtime_retry"
+    runtime["last_reason"] = reason
+    runtime["last_error"] = error_message
+    runtime["recovery"] = recovery
+    persist_runtime(paths.runtime, runtime)
+    return retry_count
+
+
+def _clear_runtime_retry_state(paths: Paths, runtime: dict[str, Any]) -> None:
+    state_payload = normalize_state_payload(read_json(paths.state))
+    if str(state_payload["state"]["recovery"].get("owner") or "") == "runtime":
+        state_payload["state"]["recovery"] = default_recovery_payload()
+        _write_state_payload(paths, state_payload)
+    if str(runtime.get("recovery", {}).get("owner") or "") == "runtime":
+        runtime["status"] = "running"
+        runtime["terminal_reason"] = "none"
+        _clear_runtime_recovery(runtime)
+        persist_runtime(paths.runtime, runtime)
+
+
+def _is_retryable_app_server_error(exc: BaseException) -> bool:
+    if isinstance(exc, OSError):
+        return True
+    if isinstance(exc, AppServerError):
+        message = str(exc).lower()
+        return any(token in message for token in ("connection", "closed", "timeout"))
+    if isinstance(exc, HarnessError):
+        return "app-server connection failed" in str(exc).lower()
+    return False
+
+
+def _run_with_runtime_retries(
+    *,
+    paths: Paths,
+    runtime: dict[str, Any],
+    reason: str,
+    resume_role: str,
+    resume_task_id: str,
+    resume_attempt: int,
+    sleep_seconds: float,
+    is_retryable: Callable[[BaseException], bool],
+    operation: Callable[[], Any],
+) -> Any:
+    while True:
+        try:
+            result = operation()
+        except Exception as exc:
+            if not is_retryable(exc):
+                raise
+            retry_count = _record_runtime_retry(
+                paths,
+                runtime,
+                reason=reason,
+                error_message=str(exc),
+                resume_role=resume_role,
+                resume_task_id=resume_task_id,
+                resume_attempt=resume_attempt,
+                exhausted=False,
+            )
+            if retry_count > _RUNTIME_RETRY_LIMIT:
+                _record_runtime_retry(
+                    paths,
+                    runtime,
+                    reason=reason,
+                    error_message=str(exc),
+                    resume_role=resume_role,
+                    resume_task_id=resume_task_id,
+                    resume_attempt=resume_attempt,
+                    exhausted=True,
+                    retry_count_override=retry_count,
+                )
+                raise RuntimeRetryExhausted(
+                    reason=reason,
+                    resume_role=resume_role,
+                    resume_task_id=resume_task_id,
+                    resume_attempt=resume_attempt,
+                    cause=exc,
+                ) from exc
+            time.sleep(sleep_seconds)
+            continue
+        _clear_runtime_retry_state(paths, runtime)
+        return result
 
 
 def _run_parallel_implementers(
@@ -441,21 +600,45 @@ def run_runtime(args: argparse.Namespace) -> int:
             persist_runtime(paths.runtime, runtime)
 
             try:
-                turn = run_role_turn(
-                    manager=manager,
-                    role="verifier",
-                    task_id=task_id,
-                    prompt=build_verifier_prompt(
-                        paths,
+                attempt = int(record.get("attempt") or 0)
+                turn = _run_with_runtime_retries(
+                    paths=paths,
+                    runtime=runtime,
+                    reason="app_server_turn_failed",
+                    resume_role="verifier",
+                    resume_task_id=task_id,
+                    resume_attempt=attempt,
+                    sleep_seconds=args.sleep_seconds,
+                    is_retryable=_is_retryable_app_server_error,
+                    operation=lambda: run_role_turn(
+                        manager=manager,
+                        role="verifier",
                         task_id=task_id,
-                        attempt=int(record.get("attempt") or 0),
-                        trial_commit=str(record.get("trial_commit") or ""),
+                        prompt=build_verifier_prompt(
+                            paths,
+                            task_id=task_id,
+                            attempt=attempt,
+                            trial_commit=str(record.get("trial_commit") or ""),
+                        ),
+                        repo=Path(str(record.get("worktree_path") or paths.repo)),
+                        sandbox=sandbox_for_role("verifier", execution_policy),
                     ),
-                    repo=Path(str(record.get("worktree_path") or paths.repo)),
-                    sandbox=sandbox_for_role("verifier", execution_policy),
                 )
                 with supervisor_lock:
-                    decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
+                    decision = _run_with_runtime_retries(
+                        paths=paths,
+                        runtime=runtime,
+                        reason="git_or_worktree_apply_failed",
+                        resume_role="verifier",
+                        resume_task_id=task_id,
+                        resume_attempt=attempt,
+                        sleep_seconds=args.sleep_seconds,
+                        is_retryable=lambda exc: isinstance(exc, (HarnessError, OSError)),
+                        operation=lambda: evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"]),
+                    )
+            except RuntimeRetryExhausted:
+                manager.shutdown()
+                return 2
             except (HarnessError, AppServerError, OSError) as exc:
                 _set_runtime_recovery(
                     runtime,
@@ -504,16 +687,29 @@ def run_runtime(args: argparse.Namespace) -> int:
             persist_runtime(paths.runtime, runtime)
 
             try:
-                turn = run_role_turn(
-                    manager=manager,
-                    role="planner",
-                    task_id="",
-                    prompt=build_planner_prompt(paths),
-                    repo=paths.repo,
-                    sandbox=sandbox_for_role("planner", execution_policy),
+                turn = _run_with_runtime_retries(
+                    paths=paths,
+                    runtime=runtime,
+                    reason="app_server_turn_failed",
+                    resume_role="planner",
+                    resume_task_id="",
+                    resume_attempt=0,
+                    sleep_seconds=args.sleep_seconds,
+                    is_retryable=_is_retryable_app_server_error,
+                    operation=lambda: run_role_turn(
+                        manager=manager,
+                        role="planner",
+                        task_id="",
+                        prompt=build_planner_prompt(paths),
+                        repo=paths.repo,
+                        sandbox=sandbox_for_role("planner", execution_policy),
+                    ),
                 )
                 with supervisor_lock:
                     decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
+            except RuntimeRetryExhausted:
+                manager.shutdown()
+                return 2
             except (HarnessError, AppServerError, OSError) as exc:
                 _set_runtime_recovery(runtime, reason=str(exc), resume_role="planner")
                 persist_runtime(paths.runtime, runtime)
@@ -612,12 +808,22 @@ def run_runtime(args: argparse.Namespace) -> int:
                     task = batch_tasks[0]
                     task_id = str(task["id"])
                     record = _active_tasks(state_payload)[task_id]
-                    workspace = prepare_task_worktree(
-                        repo=paths.repo,
-                        task_id=task_id,
-                        branch_name=str(record.get("branch_name") or ""),
-                        worktree_path=str(record.get("worktree_path") or ""),
-                        base_commit=str(record.get("base_commit") or ""),
+                    workspace = _run_with_runtime_retries(
+                        paths=paths,
+                        runtime=runtime,
+                        reason="worktree_prepare_failed",
+                        resume_role="implementer",
+                        resume_task_id=task_id,
+                        resume_attempt=int(record.get("attempt") or 0),
+                        sleep_seconds=args.sleep_seconds,
+                        is_retryable=lambda exc: isinstance(exc, (HarnessError, OSError)),
+                        operation=lambda: prepare_task_worktree(
+                            repo=paths.repo,
+                            task_id=task_id,
+                            branch_name=str(record.get("branch_name") or ""),
+                            worktree_path=str(record.get("worktree_path") or ""),
+                            base_commit=str(record.get("base_commit") or ""),
+                        ),
                     )
                     state_payload = normalize_state_payload(read_json(paths.state))
                     active = _active_tasks(state_payload)
@@ -641,14 +847,24 @@ def run_runtime(args: argparse.Namespace) -> int:
                             "[END VERIFIER FEEDBACK]\n\n"
                             f"{prompt}"
                         )
-                    turn = run_role_turn(
-                        manager=manager,
-                        role="implementer",
-                        task_id=task_id,
-                        prompt=prompt,
-                        repo=Path(workspace["worktree_path"]),
-                        sandbox=sandbox_for_role("implementer", execution_policy),
-                        resume_thread_id=str(record.get("thread_id") or "") or None,
+                    turn = _run_with_runtime_retries(
+                        paths=paths,
+                        runtime=runtime,
+                        reason="app_server_turn_failed",
+                        resume_role="implementer",
+                        resume_task_id=task_id,
+                        resume_attempt=int(record.get("attempt") or 0),
+                        sleep_seconds=args.sleep_seconds,
+                        is_retryable=_is_retryable_app_server_error,
+                        operation=lambda: run_role_turn(
+                            manager=manager,
+                            role="implementer",
+                            task_id=task_id,
+                            prompt=prompt,
+                            repo=Path(workspace["worktree_path"]),
+                            sandbox=sandbox_for_role("implementer", execution_policy),
+                            resume_thread_id=str(record.get("thread_id") or "") or None,
+                        ),
                     )
                     _persist_thread_id(paths, task_id, str(turn["thread_id"]))
                     with supervisor_lock:
@@ -658,6 +874,9 @@ def run_runtime(args: argparse.Namespace) -> int:
                     runtime["last_task_id"] = task_id
                     _clear_runtime_recovery(runtime)
                     persist_runtime(paths.runtime, runtime)
+            except RuntimeRetryExhausted:
+                manager.shutdown()
+                return 2
             except (HarnessError, AppServerError, OSError) as exc:
                 active = _active_tasks(state_payload)
                 task_id = implementer_ids[0] if implementer_ids else ""
@@ -703,16 +922,29 @@ def run_runtime(args: argparse.Namespace) -> int:
         persist_runtime(paths.runtime, runtime)
 
         try:
-            turn = run_role_turn(
-                manager=manager,
-                role="planner",
-                task_id="",
-                prompt=build_planner_prompt(paths),
-                repo=paths.repo,
-                sandbox=sandbox_for_role("planner", execution_policy),
+            turn = _run_with_runtime_retries(
+                paths=paths,
+                runtime=runtime,
+                reason="app_server_turn_failed",
+                resume_role="planner",
+                resume_task_id="",
+                resume_attempt=0,
+                sleep_seconds=args.sleep_seconds,
+                is_retryable=_is_retryable_app_server_error,
+                operation=lambda: run_role_turn(
+                    manager=manager,
+                    role="planner",
+                    task_id="",
+                    prompt=build_planner_prompt(paths),
+                    repo=paths.repo,
+                    sandbox=sandbox_for_role("planner", execution_policy),
+                ),
             )
             with supervisor_lock:
                 decision = evaluate_supervisor_status(repo=paths.repo, report_override=turn["report"])
+        except RuntimeRetryExhausted:
+            manager.shutdown()
+            return 2
         except (HarnessError, AppServerError, OSError) as exc:
             _set_runtime_recovery(runtime, reason=str(exc), resume_role="planner")
             persist_runtime(paths.runtime, runtime)

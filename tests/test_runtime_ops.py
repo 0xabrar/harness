@@ -636,6 +636,250 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             self.assertTrue(paths.state.exists())
             self.assertTrue(paths.events.exists())
 
+    def test_run_runtime_retries_app_server_fault_and_clears_runtime_retry_state_on_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = default_paths(repo)
+
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Retry a transient app-server failure",
+                    prompt_text=None,
+                    config={
+                        "goal": "Retry a transient app-server failure",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 2,
+                    },
+                ),
+            )
+            initialize_run(
+                repo=repo,
+                goal="Retry a transient app-server failure",
+                scope=".",
+                session_mode="background",
+                execution_policy="danger_full_access",
+                max_task_attempts=2,
+                force=True,
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Retry a transient app-server failure",
+                    "planner_revision": 1,
+                    "tasks": [
+                        {
+                            "id": "T-001",
+                            "title": "Task T-001",
+                            "description": "Only task",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        }
+                    ],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+
+            calls = {"implementer": 0, "verifier": 0}
+
+            def fake_run_role_turn(*, role: str, task_id: str, **kwargs: Any) -> dict[str, Any]:
+                if role == "implementer":
+                    calls["implementer"] += 1
+                    if calls["implementer"] == 1:
+                        raise HarnessError("App-server connection failed twice for role 'implementer'")
+                    state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+                    runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
+                    self.assertEqual("runtime", state_payload["state"]["recovery"]["owner"])
+                    self.assertEqual(1, state_payload["state"]["recovery"]["retry"]["count"])
+                    self.assertEqual("app_server_turn_failed", state_payload["state"]["recovery"]["retry"]["reason"])
+                    self.assertEqual("runtime", runtime_payload["recovery"]["owner"])
+                    self.assertEqual(1, runtime_payload["recovery"]["retry"]["count"])
+                    self.assertEqual("app_server_turn_failed", runtime_payload["recovery"]["retry"]["reason"])
+                    return {
+                        "report": {
+                            "role": "implementer",
+                            "task_id": task_id,
+                            "attempt": 1,
+                            "commit": "commit-T-001",
+                            "summary": "implemented after retry",
+                            "files_changed": ["task.txt"],
+                            "checks_run": [],
+                            "proposed_tasks": [],
+                        },
+                        "thread_id": "thread-T-001",
+                        "turn_result": {},
+                        "parse_error": None,
+                    }
+
+                calls["verifier"] += 1
+                return {
+                    "report": {
+                        "role": "verifier",
+                        "task_id": task_id,
+                        "attempt": 1,
+                        "commit": "commit-T-001",
+                        "verdict": "accept",
+                        "summary": "verified",
+                        "findings": [],
+                        "criteria_results": [],
+                        "proposed_tasks": [],
+                    },
+                    "thread_id": "verify-T-001",
+                    "turn_result": {},
+                    "parse_error": None,
+                }
+
+            class FakeServerManager:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+
+                def kill_orphans(self) -> None:
+                    return None
+
+                def shutdown(self) -> None:
+                    return None
+
+            def fake_prepare_task_worktree(*, task_id: str, **kwargs: Any) -> dict[str, str]:
+                worktree = repo / f"worktree-{task_id}"
+                worktree.mkdir(exist_ok=True)
+                return {
+                    "branch_name": f"branch-{task_id}",
+                    "worktree_path": str(worktree),
+                    "base_commit": "base-commit",
+                }
+
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
+                "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
+            ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
+                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+            ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
+                "harness_runtime_ops.time.sleep", return_value=None
+            ) as mock_sleep:
+                exit_code = run_runtime(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(calls["implementer"], 2)
+            self.assertEqual(calls["verifier"], 1)
+            self.assertGreaterEqual(mock_sleep.call_count, 1)
+
+            state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+            self.assertEqual("clear", state_payload["state"]["recovery"]["status"])
+            runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
+            self.assertEqual("terminal", runtime_payload["status"])
+            self.assertEqual("all_tasks_done", runtime_payload["terminal_reason"])
+            self.assertEqual("clear", runtime_payload["recovery"]["status"])
+
+    def test_run_runtime_exhausts_worktree_retry_budget_into_runtime_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = default_paths(repo)
+
+            write_json_atomic(
+                paths.launch,
+                build_launch_manifest(
+                    original_goal="Exhaust runtime worktree retries",
+                    prompt_text=None,
+                    config={
+                        "goal": "Exhaust runtime worktree retries",
+                        "scope": ".",
+                        "session_mode": "background",
+                        "execution_policy": "danger_full_access",
+                        "stop_condition": "",
+                        "allow_task_expansion": "enabled",
+                        "max_task_attempts": 2,
+                    },
+                ),
+            )
+            initialize_run(
+                repo=repo,
+                goal="Exhaust runtime worktree retries",
+                scope=".",
+                session_mode="background",
+                execution_policy="danger_full_access",
+                max_task_attempts=2,
+                force=True,
+            )
+            write_tasks(
+                paths.tasks,
+                {
+                    "version": 1,
+                    "goal": "Exhaust runtime worktree retries",
+                    "planner_revision": 1,
+                    "tasks": [
+                        {
+                            "id": "T-001",
+                            "title": "Task T-001",
+                            "description": "Only task",
+                            "acceptance_criteria": ["done"],
+                            "status": "ready",
+                            "priority": 1,
+                            "dependencies": [],
+                            "attempts": 0,
+                        }
+                    ],
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                },
+            )
+
+            attempts = {"prepare": 0}
+
+            class FakeServerManager:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+
+                def kill_orphans(self) -> None:
+                    return None
+
+                def shutdown(self) -> None:
+                    return None
+
+            def fake_prepare_task_worktree(**kwargs: Any) -> dict[str, str]:
+                attempts["prepare"] += 1
+                raise HarnessError("simulated worktree prepare failure")
+
+            args = argparse.Namespace(repo=str(repo), codex_bin="codex", sleep_seconds=0)
+
+            with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
+                "harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree
+            ), patch("harness_runtime_ops.run_role_turn") as mock_run_role_turn, patch(
+                "harness_runtime_ops.time.sleep", return_value=None
+            ) as mock_sleep:
+                exit_code = run_runtime(args)
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(attempts["prepare"], 2)
+            self.assertEqual(mock_run_role_turn.call_count, 0)
+            self.assertGreaterEqual(mock_sleep.call_count, 1)
+
+            state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+            self.assertEqual("pending", state_payload["state"]["recovery"]["status"])
+            self.assertEqual("runtime", state_payload["state"]["recovery"]["owner"])
+            self.assertEqual(2, state_payload["state"]["recovery"]["retry"]["count"])
+            self.assertEqual("worktree_prepare_failed", state_payload["state"]["recovery"]["retry"]["reason"])
+            self.assertEqual("implementer", state_payload["state"]["recovery"]["retry"]["resume_role"])
+            self.assertEqual("T-001", state_payload["state"]["recovery"]["retry"]["resume_task_id"])
+            self.assertEqual(1, state_payload["state"]["recovery"]["retry"]["resume_attempt"])
+
+            runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
+            self.assertEqual("recovery", runtime_payload["status"])
+            self.assertIn("simulated worktree prepare failure", runtime_payload["terminal_reason"])
+            self.assertEqual("pending", runtime_payload["recovery"]["status"])
+            self.assertEqual("runtime", runtime_payload["recovery"]["owner"])
+            self.assertEqual(2, runtime_payload["recovery"]["retry"]["count"])
+            self.assertEqual("worktree_prepare_failed", runtime_payload["recovery"]["retry"]["reason"])
+
     def test_multiple_ready_tasks_run_one_implementer_turn_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
