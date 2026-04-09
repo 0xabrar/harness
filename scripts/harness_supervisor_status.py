@@ -25,7 +25,7 @@ from harness_artifacts import (
     write_tasks,
 )
 from harness_lessons import append_lesson
-from harness_task_worktree import cherry_pick_commit, git_head, remove_task_worktree, reset_task_worktree
+from harness_task_worktree import git_head, integrate_commit, remove_task_worktree, reset_task_worktree
 
 
 def _active_tasks(state_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -44,6 +44,8 @@ def _set_recovery(
     resume_role: str = "",
     resume_task_id: str = "",
     resume_attempt: int = 0,
+    commit: str = "",
+    details: dict[str, Any] | None = None,
 ) -> None:
     recovery = default_recovery_payload()
     recovery.update(
@@ -56,7 +58,32 @@ def _set_recovery(
             "resume_attempt": resume_attempt,
         }
     )
+    recovery["incident"].update(
+        {
+            "owner": owner,
+            "reason": reason,
+            "resume_role": resume_role,
+            "resume_task_id": resume_task_id,
+            "resume_attempt": resume_attempt,
+            "commit": commit,
+            "details": dict(details or {}),
+        }
+    )
     normalize_state_payload(state_payload)["state"]["recovery"] = recovery
+
+
+def _integration_recovery_details(record: dict[str, Any], *, outcome: str, detail: str, returncode: int) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "outcome": outcome,
+        "returncode": returncode,
+    }
+    if detail:
+        details["detail"] = detail
+    for key in ("branch_name", "worktree_path", "base_commit"):
+        value = str(record.get(key) or "")
+        if value:
+            details[key] = value
+    return details
 
 
 def _task_sort_key(task: dict[str, Any]) -> tuple[int, str]:
@@ -285,13 +312,46 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
 
     state_payload["state"]["verifier_runs"] += 1
     state_payload["state"]["last_verdict"] = verdict
-    state_payload["state"]["last_status"] = "recovery" if verdict == "needs_human" else verdict
 
     if verdict == "accept":
-        _clear_recovery(state_payload)
         integrated_commit = commit
         if str(record.get("worktree_path") or ""):
-            integrated_commit = cherry_pick_commit(repo=paths.repo, commit=commit)
+            integration = integrate_commit(repo=paths.repo, commit=commit)
+            if integration.outcome != "applied":
+                incident_reason = f"integration_{integration.outcome}"
+                task["status"] = "blocked"
+                task["blocked_reason"] = (
+                    f"Accepted task could not be integrated onto main ({integration.outcome})."
+                )
+                task["last_verdict"] = "accept"
+                state_payload["state"]["last_status"] = "recovery"
+                state_payload["state"]["recovery_requests"] += 1
+                state_payload["state"]["blocked"] += 1
+                active.pop(task_id, None)
+                _set_recovery(
+                    state_payload,
+                    owner="planner",
+                    reason=incident_reason,
+                    resume_role="planner",
+                    resume_task_id=task_id,
+                    resume_attempt=attempt,
+                    commit=commit,
+                    details=_integration_recovery_details(
+                        record,
+                        outcome=integration.outcome,
+                        detail=integration.detail,
+                        returncode=integration.returncode,
+                    ),
+                )
+                return {
+                    "decision": "recovery",
+                    "reason": incident_reason,
+                    "report": report,
+                    "tasks": tasks_payload,
+                }
+            integrated_commit = integration.integrated_commit
+        _clear_recovery(state_payload)
+        state_payload["state"]["last_status"] = "accept"
         task["status"] = "done"
         task["last_verdict"] = "accept"
         task["last_integrated_commit"] = integrated_commit
@@ -332,6 +392,7 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
         return {"decision": "relaunch", "reason": "continue_after_accept", "report": report, "tasks": tasks_payload}
 
     if verdict == "needs_human":
+        state_payload["state"]["last_status"] = "recovery"
         task["status"] = "blocked"
         task["blocked_reason"] = summary
         state_payload["state"]["recovery_requests"] += 1
@@ -348,6 +409,7 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
         return {"decision": "recovery", "reason": "verifier_escalated", "report": report, "tasks": tasks_payload}
 
     _clear_recovery(state_payload)
+    state_payload["state"]["last_status"] = "revert"
     if str(record.get("worktree_path") or ""):
         next_base = git_head(paths.repo)
         reset_task_worktree(

@@ -13,6 +13,7 @@ from harness_app_server import AppServerError
 from harness_artifacts import HarnessError, build_launch_manifest, default_paths, write_json_atomic, write_tasks
 from harness_init_run import initialize_run
 from harness_runtime_ops import run_role_turn, run_runtime, sandbox_for_role, start_runtime
+from harness_task_worktree import IntegrationResult
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +579,14 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
                 "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
             ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
-                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+                "harness_supervisor_status.integrate_commit",
+                side_effect=lambda **kwargs: IntegrationResult(
+                    outcome="applied",
+                    integrated_commit=f"integrated-{kwargs['commit']}",
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
             ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
                 "harness_runtime_ops.time.sleep", return_value=None
             ):
@@ -1004,7 +1012,14 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
                 "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
             ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
-                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+                "harness_supervisor_status.integrate_commit",
+                side_effect=lambda **kwargs: IntegrationResult(
+                    outcome="applied",
+                    integrated_commit=f"integrated-{kwargs['commit']}",
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
             ), patch("harness_supervisor_status.remove_task_worktree", return_value=None), patch(
                 "harness_runtime_ops.time.sleep", return_value=None
             ):
@@ -1133,16 +1148,27 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
                 "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
             ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
-                "harness_supervisor_status.cherry_pick_commit", side_effect=HarnessError("simulated cherry-pick conflict")
+                "harness_supervisor_status.integrate_commit",
+                return_value=IntegrationResult(
+                    outcome="conflict",
+                    integrated_commit="",
+                    returncode=1,
+                    stdout="",
+                    stderr="simulated cherry-pick conflict",
+                ),
             ), patch("harness_runtime_ops.time.sleep", return_value=None):
                 exit_code = run_runtime(args)
 
             self.assertEqual(exit_code, 2)
             runtime_payload = json.loads(paths.runtime.read_text(encoding="utf-8"))
             self.assertEqual(runtime_payload["status"], "recovery")
-            self.assertIn("simulated cherry-pick conflict", runtime_payload["terminal_reason"])
+            self.assertEqual("integration_conflict", runtime_payload["terminal_reason"])
             self.assertEqual("pending", runtime_payload["recovery"]["status"])
-            self.assertEqual("runtime", runtime_payload["recovery"]["owner"])
+            self.assertEqual("planner", runtime_payload["recovery"]["owner"])
+            state_payload = json.loads(paths.state.read_text(encoding="utf-8"))
+            self.assertEqual("planner", state_payload["state"]["recovery"]["owner"])
+            self.assertEqual("commit-T-001", state_payload["state"]["recovery"]["incident"]["commit"])
+            self.assertEqual("conflict", state_payload["state"]["recovery"]["incident"]["details"]["outcome"])
 
     def test_complex_dag_with_parallel_fan_in_and_retry_reaches_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1310,7 +1336,14 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             with patch("harness_runtime_ops.ServerManager", FakeServerManager), patch(
                 "harness_runtime_ops.run_role_turn", side_effect=fake_run_role_turn
             ), patch("harness_runtime_ops.prepare_task_worktree", side_effect=fake_prepare_task_worktree), patch(
-                "harness_supervisor_status.cherry_pick_commit", side_effect=lambda **kwargs: f"integrated-{kwargs['commit']}"
+                "harness_supervisor_status.integrate_commit",
+                side_effect=lambda **kwargs: IntegrationResult(
+                    outcome="applied",
+                    integrated_commit=f"integrated-{kwargs['commit']}",
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
             ), patch("harness_supervisor_status.git_head", return_value="base-commit-2"), patch(
                 "harness_supervisor_status.reset_task_worktree", return_value=None
             ), patch(

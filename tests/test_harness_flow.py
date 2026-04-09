@@ -373,6 +373,103 @@ class HarnessFlowTests(unittest.TestCase):
             self.assertEqual(main_head_before, git(repo, "rev-parse", "HEAD"))
             self.assertIn(str(worktree), git(repo, "worktree", "list"))
 
+    def test_worktree_accept_conflict_routes_to_planner_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = setup_repo(Path(tmp))
+            initialize_run(
+                repo=repo,
+                goal="Build harness",
+                scope="repo",
+                session_mode="background",
+                execution_policy="danger_full_access",
+            )
+            seed_ready_task(repo)
+
+            reports = type("Paths", (), {"reports": repo / "reports"})()
+            planner_report = report_path_for_role(reports, "planner", planner_revision=1)
+            write_json(
+                planner_report,
+                {
+                    "role": "planner",
+                    "revision": 1,
+                    "summary": "Initial task graph ready.",
+                    "task_changes": {"added": ["T-001"], "updated": [], "closed": []},
+                    "planner_requested_reason": "initial_plan",
+                },
+            )
+            evaluate_supervisor_status(repo=repo)
+
+            workspace = prepare_task_worktree(repo=repo, task_id="T-001")
+            worktree = Path(workspace["worktree_path"])
+            (worktree / "app.txt").write_text("feature\n", encoding="utf-8")
+            git(worktree, "add", "app.txt")
+            git(worktree, "commit", "-m", "implement in worktree")
+            trial_commit = git(worktree, "rev-parse", "HEAD")
+
+            (repo / "app.txt").write_text("mainline\n", encoding="utf-8")
+            git(repo, "commit", "-am", "mainline change")
+            main_head_before = git(repo, "rev-parse", "HEAD")
+
+            state = read_json(repo / "harness-state.json")
+            state["state"]["active_tasks"]["T-001"].update(workspace)
+            write_json(repo / "harness-state.json", state)
+
+            impl_report = report_path_for_role(reports, "implementer", task_id="T-001", attempt=1)
+            write_json(
+                impl_report,
+                {
+                    "role": "implementer",
+                    "task_id": "T-001",
+                    "attempt": 1,
+                    "commit": trial_commit,
+                    "summary": "Implemented the task in an isolated worktree.",
+                    "files_changed": ["app.txt"],
+                    "checks_run": [],
+                    "proposed_tasks": [],
+                },
+            )
+            evaluate_supervisor_status(repo=repo)
+
+            verdict_report = report_path_for_role(reports, "verifier", task_id="T-001", attempt=1)
+            write_json(
+                verdict_report,
+                {
+                    "role": "verifier",
+                    "task_id": "T-001",
+                    "attempt": 1,
+                    "commit": trial_commit,
+                    "verdict": "accept",
+                    "summary": "Task accepted.",
+                    "findings": [],
+                    "criteria_results": [],
+                    "proposed_tasks": [],
+                },
+            )
+            outcome = evaluate_supervisor_status(repo=repo)
+            self.assertEqual(outcome["decision"], "recovery")
+            self.assertEqual(outcome["reason"], "integration_conflict")
+
+            state = read_json(repo / "harness-state.json")
+            self.assertEqual("recovery", state["state"]["last_status"])
+            self.assertEqual("integration_conflict", state["state"]["last_decision"])
+            self.assertEqual(1, state["state"]["recovery_requests"])
+            self.assertEqual("pending", state["state"]["recovery"]["status"])
+            self.assertEqual("planner", state["state"]["recovery"]["owner"])
+            self.assertEqual("planner", state["state"]["recovery"]["incident"]["owner"])
+            self.assertEqual("integration_conflict", state["state"]["recovery"]["incident"]["reason"])
+            self.assertEqual("T-001", state["state"]["recovery"]["incident"]["resume_task_id"])
+            self.assertEqual(1, state["state"]["recovery"]["incident"]["resume_attempt"])
+            self.assertEqual(trial_commit, state["state"]["recovery"]["incident"]["commit"])
+            self.assertEqual("conflict", state["state"]["recovery"]["incident"]["details"]["outcome"])
+            self.assertEqual(str(worktree), state["state"]["recovery"]["incident"]["details"]["worktree_path"])
+            self.assertEqual({}, state["state"]["active_tasks"])
+
+            tasks = read_json(repo / "tasks.json")
+            self.assertEqual("blocked", tasks["tasks"][0]["status"])
+            self.assertEqual("accept", tasks["tasks"][0]["last_verdict"])
+            self.assertEqual(main_head_before, git(repo, "rev-parse", "HEAD"))
+            self.assertIn(str(worktree), git(repo, "worktree", "list"))
+
     def test_report_alias_fields_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = setup_repo(Path(tmp))
