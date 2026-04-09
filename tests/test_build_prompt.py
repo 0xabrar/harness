@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -84,6 +84,28 @@ def _mock_refresh_ready_tasks(tasks: dict) -> dict:
     return tasks
 
 
+def _build_planner_prompt_for(*, state: dict | None = None, tasks: dict | None = None) -> str:
+    state_payload = deepcopy(state or FAKE_STATE)
+    tasks_payload = deepcopy(tasks or FAKE_TASKS)
+
+    def _read_json(path: Path) -> dict:
+        if "state" in path.name:
+            return deepcopy(state_payload)
+        if "tasks" in path.name:
+            return deepcopy(tasks_payload)
+        raise FileNotFoundError(path)
+
+    def _load_tasks(path: Path) -> dict:
+        return deepcopy(tasks_payload)
+
+    with (
+        patch("harness_build_prompt.refresh_ready_tasks", side_effect=_mock_refresh_ready_tasks),
+        patch("harness_build_prompt.load_tasks", side_effect=_load_tasks),
+        patch("harness_build_prompt.read_json", side_effect=_read_json),
+    ):
+        return build_planner_prompt(FAKE_PATHS)
+
+
 class TestPlannerPrompt(unittest.TestCase):
     @patch("harness_build_prompt.refresh_ready_tasks", side_effect=_mock_refresh_ready_tasks)
     @patch("harness_build_prompt.load_tasks", side_effect=_mock_load_tasks)
@@ -108,6 +130,99 @@ class TestPlannerPrompt(unittest.TestCase):
         self.assertIn("revision", prompt)
         self.assertIn("summary", prompt)
         self.assertIn("task_changes", prompt)
+
+    def test_pending_integration_recovery_includes_structured_context(self) -> None:
+        state = deepcopy(FAKE_STATE)
+        state["state"]["recovery"] = {
+            "status": "pending",
+            "owner": "planner",
+            "reason": "integration_conflict",
+            "resume_role": "planner",
+            "resume_task_id": "T-001",
+            "resume_attempt": 2,
+            "incident": {
+                "owner": "planner",
+                "reason": "integration_conflict",
+                "resume_role": "planner",
+                "resume_task_id": "T-001",
+                "resume_attempt": 2,
+                "commit": "deadbeef",
+                "details": {"outcome": "conflict", "worktree_path": "/tmp/worktree-T-001"},
+            },
+            "retry": {
+                "count": 0,
+                "reason": "",
+                "resume_role": "",
+                "resume_task_id": "",
+                "resume_attempt": 0,
+            },
+        }
+
+        prompt = _build_planner_prompt_for(state=state)
+
+        self.assertIn("Recovery owner: planner", prompt)
+        self.assertIn("Recovery reason: integration_conflict", prompt)
+        self.assertIn("Resume target: role=planner, task=T-001, attempt=2", prompt)
+        self.assertIn("Incident details:", prompt)
+        self.assertIn("- commit: deadbeef", prompt)
+        self.assertIn('"outcome": "conflict"', prompt)
+        self.assertIn("Create repair or sequencing tasks for semantic recovery", prompt)
+
+    def test_pending_retry_recovery_includes_retry_details(self) -> None:
+        state = deepcopy(FAKE_STATE)
+        state["state"]["recovery"] = {
+            "status": "pending",
+            "owner": "runtime",
+            "reason": "app_server_turn_failed",
+            "resume_role": "implementer",
+            "resume_task_id": "T-001",
+            "resume_attempt": 3,
+            "incident": {
+                "owner": "",
+                "reason": "",
+                "resume_role": "",
+                "resume_task_id": "",
+                "resume_attempt": 0,
+                "commit": "",
+                "details": {},
+            },
+            "retry": {
+                "count": 2,
+                "reason": "app_server_turn_failed",
+                "resume_role": "implementer",
+                "resume_task_id": "T-001",
+                "resume_attempt": 3,
+            },
+        }
+
+        prompt = _build_planner_prompt_for(state=state)
+
+        self.assertIn("Recovery owner: runtime", prompt)
+        self.assertIn("Recovery reason: app_server_turn_failed", prompt)
+        self.assertIn("Resume target: role=implementer, task=T-001, attempt=3", prompt)
+        self.assertIn("Retry details:", prompt)
+        self.assertIn("- count: 2", prompt)
+        self.assertIn("- reason: app_server_turn_failed", prompt)
+
+    def test_exhausted_retry_replan_includes_failed_task_snapshot(self) -> None:
+        state = deepcopy(FAKE_STATE)
+        state["state"]["planner_pending_reason"] = "planner_replan_after_revert"
+        tasks = deepcopy(FAKE_TASKS)
+        tasks["tasks"][0]["status"] = "failed"
+        tasks["tasks"][0]["attempts"] = 3
+        tasks["tasks"][0]["last_verdict"] = "revert"
+        tasks["tasks"][0]["last_attempt_commit"] = "deadbeef"
+        tasks["tasks"][0]["blocked_reason"] = "Attempt 3 rejected"
+
+        prompt = _build_planner_prompt_for(state=state, tasks=tasks)
+
+        self.assertIn("A task exhausted its implementation retries and needs planner repair.", prompt)
+        self.assertIn("Planner requested reason: planner_replan_after_revert", prompt)
+        self.assertIn(
+            "- T-001: attempts=3, last_verdict=revert, last_attempt_commit=deadbeef, blocked_reason=Attempt 3 rejected",
+            prompt,
+        )
+        self.assertIn("Replace, split, or sequence follow-up tasks", prompt)
 
 
 class TestImplementerPrompt(unittest.TestCase):

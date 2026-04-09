@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from harness_artifacts import (
@@ -44,9 +45,121 @@ def _active_task_record(state: dict, tasks: dict, *, role: str) -> tuple[dict, d
     return task, active[task_id]
 
 
+def _resume_target(*, role: str, task_id: str, attempt: int) -> str:
+    parts: list[str] = []
+    if role:
+        parts.append(f"role={role}")
+    if task_id:
+        parts.append(f"task={task_id}")
+    if attempt:
+        parts.append(f"attempt={attempt}")
+    return ", ".join(parts) or "none"
+
+
+def _planner_recovery_context(state: dict, tasks: dict) -> str:
+    state_block = state.get("state", {})
+    recovery = state_block.get("recovery", {})
+    sections: list[str] = []
+
+    if str(recovery.get("status") or "") == "pending":
+        owner = str(recovery.get("owner") or "unknown")
+        reason = str(recovery.get("reason") or "unknown")
+        resume_target = _resume_target(
+            role=str(recovery.get("resume_role") or ""),
+            task_id=str(recovery.get("resume_task_id") or ""),
+            attempt=int(recovery.get("resume_attempt") or 0),
+        )
+        lines = [
+            "<recovery_context>",
+            "Recovery is pending. Repair the DAG so the runtime can resume safely.",
+            f"Recovery owner: {owner}",
+            f"Recovery reason: {reason}",
+            f"Resume target: {resume_target}",
+        ]
+
+        incident = recovery.get("incident") or {}
+        if any(
+            incident.get(key)
+            for key in ("owner", "reason", "resume_role", "resume_task_id", "resume_attempt", "commit", "details")
+        ):
+            lines.extend(
+                [
+                    "Incident details:",
+                    f"- owner: {str(incident.get('owner') or owner)}",
+                    f"- reason: {str(incident.get('reason') or reason)}",
+                    "- resume target: "
+                    + _resume_target(
+                        role=str(incident.get("resume_role") or ""),
+                        task_id=str(incident.get("resume_task_id") or ""),
+                        attempt=int(incident.get("resume_attempt") or 0),
+                    ),
+                    f"- commit: {str(incident.get('commit') or 'none')}",
+                    "- details: "
+                    + json.dumps(dict(incident.get("details") or {}), sort_keys=True),
+                ]
+            )
+
+        retry = recovery.get("retry") or {}
+        if any(retry.get(key) for key in ("count", "reason", "resume_role", "resume_task_id", "resume_attempt")):
+            lines.extend(
+                [
+                    "Retry details:",
+                    f"- count: {int(retry.get('count') or 0)}",
+                    f"- reason: {str(retry.get('reason') or reason)}",
+                    "- resume target: "
+                    + _resume_target(
+                        role=str(retry.get("resume_role") or ""),
+                        task_id=str(retry.get("resume_task_id") or ""),
+                        attempt=int(retry.get("resume_attempt") or 0),
+                    ),
+                ]
+            )
+
+        lines.extend(
+            [
+                "Planner action:",
+                "- Create repair or sequencing tasks for semantic recovery when the current DAG cannot safely continue.",
+                "- Re-sequence, split, or add explicit unblockers instead of leaving the affected work blocked with no ready path.",
+                "</recovery_context>",
+                "",
+            ]
+        )
+        sections.append("\n".join(lines))
+
+    pending_reason = str(state_block.get("planner_pending_reason") or "")
+    failed_tasks = [task for task in tasks.get("tasks", []) if str(task.get("status") or "") == "failed"]
+    if pending_reason == "planner_replan_after_revert" and failed_tasks:
+        lines = [
+            "<retry_context>",
+            "A task exhausted its implementation retries and needs planner repair.",
+            f"Planner requested reason: {pending_reason}",
+            "Failed task snapshots:",
+        ]
+        for task in sorted(failed_tasks, key=_task_sort_key):
+            lines.append(
+                f"- {task['id']}: attempts={int(task.get('attempts', 0))}, "
+                f"last_verdict={str(task.get('last_verdict') or 'unknown')}, "
+                f"last_attempt_commit={str(task.get('last_attempt_commit') or 'none')}, "
+                f"blocked_reason={str(task.get('blocked_reason') or 'none')}"
+            )
+        lines.extend(
+            [
+                "Planner action:",
+                "- Replace, split, or sequence follow-up tasks so the failed work no longer blocks the DAG.",
+                "- Rewrite acceptance criteria if repeated retries exposed ambiguity or an unsafe task boundary.",
+                "</retry_context>",
+                "",
+            ]
+        )
+        sections.append("\n".join(lines))
+
+    return "".join(sections)
+
+
 def build_planner_prompt(paths: Paths) -> str:
     state, tasks = state_context(paths)
     revision = int(tasks.get("planner_revision", 0)) + 1
+    recovery_context = _planner_recovery_context(state, tasks)
     return f"""$harness
 You are the planner role for this harness-managed repo.
 
@@ -68,7 +181,7 @@ Events: {paths.events}
 Reports: {paths.reports}
 </paths>
 
-<task_design>
+{recovery_context}<task_design>
 Each task should be small enough for one implementer turn — roughly one file or one focused feature.
 
 Every task must have explicit, testable acceptance criteria. "Works correctly" is not a criterion. "greet('World') returns 'Hello, World!'" is.
@@ -81,6 +194,7 @@ Add, split, reprioritize, or close tasks as needed.
 Do not write product code.
 Do not guess at implementation details you have not verified by reading the repo.
 If prior reports in {paths.reports} show repeated failures on a task, consider splitting it or rewriting its acceptance criteria.
+When recovery context is present, convert it into concrete repair or sequencing tasks instead of leaving the run blocked.
 </constraints>
 
 <output>
