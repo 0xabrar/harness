@@ -324,8 +324,6 @@ def normalize_state_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("planner_pending_reason", "")
     state.setdefault("accepted_commit", "")
     state.setdefault("last_status", "initialized")
-    if str(state.get("last_status") or "") == "needs_human":
-        state["last_status"] = "recovery"
     state.setdefault("last_decision", "initialize")
     state.setdefault("last_verdict", "")
     state.setdefault("planner_runs", 0)
@@ -335,17 +333,10 @@ def normalize_state_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("reverts", 0)
     state.setdefault("replans", 0)
     state.setdefault("blocked", 0)
-    legacy_needs_human = state.pop("needs_human", None)
-    if "recovery_requests" not in state:
-        try:
-            state["recovery_requests"] = int(legacy_needs_human or 0)
-        except (TypeError, ValueError):
-            state["recovery_requests"] = 0
-    else:
-        try:
-            state["recovery_requests"] = int(state.get("recovery_requests") or 0)
-        except (TypeError, ValueError):
-            state["recovery_requests"] = 0
+    try:
+        state["recovery_requests"] = int(state.get("recovery_requests") or 0)
+    except (TypeError, ValueError):
+        state["recovery_requests"] = 0
     state["recovery"] = normalize_recovery_payload(state.get("recovery"))
     state.setdefault("completed", False)
     for legacy_key in ("current_role", "current_task_id", "current_attempt", "trial_commit"):
@@ -410,9 +401,7 @@ def build_runtime_payload(*, paths: Paths, status: str, pid: int | None = None, 
 def normalize_runtime_payload(runtime_payload: dict[str, Any]) -> dict[str, Any]:
     payload = deepcopy(runtime_payload)
     status = str(payload.get("status") or "idle")
-    if status == "needs_human":
-        status = "recovery"
-    elif status == "stopped":
+    if status == "stopped":
         status = "terminal"
         if str(payload.get("terminal_reason") or "none") == "none":
             payload["terminal_reason"] = "user_stopped"

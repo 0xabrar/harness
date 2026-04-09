@@ -78,7 +78,7 @@ Recovery is liveness-first. When verification or integration hits a planner-fixa
 - an accepted task commit cannot be integrated cleanly onto main
 - the repo is in an inconsistent state the planner should repair by adding clarification or repair tasks
 
-Only launch/runtime faults the harness cannot repair safely leave `harness-runtime.json` in `recovery` for a later resume. `needs_human` is kept only as a legacy compatibility input; new runs record structured recovery ownership, reason, and resume hints in `harness-runtime.json` and `harness-state.json`.
+Only launch/runtime faults the harness cannot repair safely leave `harness-runtime.json` in `recovery` for a later resume. Runs record structured recovery ownership, reason, and resume hints in `harness-runtime.json` and `harness-state.json`.
 
 ## What It Writes
 

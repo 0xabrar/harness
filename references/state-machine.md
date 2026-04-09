@@ -54,4 +54,4 @@ Runtime-owned recovery pauses the run for later resume. Enter that state only fo
 - broken repo state that the runtime cannot repair safely,
 - launch/bootstrap faults that prevent safe continuation.
 
-`needs_human` is legacy compatibility only; new transitions use structured `recovery` metadata in `harness-state.json` and `harness-runtime.json`.
+Transitions use structured `recovery` metadata in `harness-state.json` and `harness-runtime.json`.
