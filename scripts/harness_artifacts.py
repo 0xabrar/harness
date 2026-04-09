@@ -125,6 +125,28 @@ def initial_plan_text(goal: str) -> str:
     return f"# Plan\n\nGoal: {goal}\n"
 
 
+def default_recovery_incident_payload() -> dict[str, Any]:
+    return {
+        "owner": "",
+        "reason": "",
+        "resume_role": "",
+        "resume_task_id": "",
+        "resume_attempt": 0,
+        "commit": "",
+        "details": {},
+    }
+
+
+def default_recovery_retry_payload() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "reason": "",
+        "resume_role": "",
+        "resume_task_id": "",
+        "resume_attempt": 0,
+    }
+
+
 def default_recovery_payload() -> dict[str, Any]:
     return {
         "status": "clear",
@@ -133,21 +155,132 @@ def default_recovery_payload() -> dict[str, Any]:
         "resume_role": "",
         "resume_task_id": "",
         "resume_attempt": 0,
+        "incident": default_recovery_incident_payload(),
+        "retry": default_recovery_retry_payload(),
     }
+
+
+def _normalize_int(value: Any) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_recovery_incident_payload(payload: Any) -> dict[str, Any]:
+    incident = deepcopy(payload) if isinstance(payload, dict) else {}
+    normalized = default_recovery_incident_payload()
+    normalized["owner"] = str(incident.get("owner") or "")
+    normalized["reason"] = str(incident.get("reason") or "")
+    normalized["resume_role"] = str(incident.get("resume_role") or "")
+    normalized["resume_task_id"] = str(incident.get("resume_task_id") or "")
+    normalized["resume_attempt"] = _normalize_int(incident.get("resume_attempt"))
+    normalized["commit"] = str(incident.get("commit") or "")
+    details = incident.get("details")
+    normalized["details"] = deepcopy(details) if isinstance(details, dict) else {}
+    return normalized
+
+
+def _normalize_recovery_retry_payload(payload: Any) -> dict[str, Any]:
+    retry = deepcopy(payload) if isinstance(payload, dict) else {}
+    normalized = default_recovery_retry_payload()
+    retry_count = retry.get("count")
+    if retry_count in (None, ""):
+        retry_count = retry.get("retry_count")
+    if retry_count in (None, ""):
+        retry_count = retry.get("attempts")
+    normalized["count"] = _normalize_int(retry_count)
+    normalized["reason"] = str(retry.get("reason") or "")
+    normalized["resume_role"] = str(retry.get("resume_role") or "")
+    normalized["resume_task_id"] = str(retry.get("resume_task_id") or "")
+    normalized["resume_attempt"] = _normalize_int(retry.get("resume_attempt"))
+    return normalized
+
+
+def _recovery_incident_has_data(incident: dict[str, Any]) -> bool:
+    return bool(
+        incident["owner"]
+        or incident["reason"]
+        or incident["resume_role"]
+        or incident["resume_task_id"]
+        or incident["resume_attempt"]
+        or incident["commit"]
+        or incident["details"]
+    )
+
+
+def _recovery_retry_has_data(retry: dict[str, Any]) -> bool:
+    return bool(
+        retry["count"]
+        or retry["reason"]
+        or retry["resume_role"]
+        or retry["resume_task_id"]
+        or retry["resume_attempt"]
+    )
 
 
 def normalize_recovery_payload(payload: Any) -> dict[str, Any]:
     recovery = deepcopy(payload) if isinstance(payload, dict) else {}
     normalized = default_recovery_payload()
     normalized["status"] = str(recovery.get("status") or normalized["status"])
-    normalized["owner"] = str(recovery.get("owner") or "")
-    normalized["reason"] = str(recovery.get("reason") or "")
-    normalized["resume_role"] = str(recovery.get("resume_role") or "")
-    normalized["resume_task_id"] = str(recovery.get("resume_task_id") or "")
-    try:
-        normalized["resume_attempt"] = int(recovery.get("resume_attempt") or 0)
-    except (TypeError, ValueError):
-        normalized["resume_attempt"] = 0
+    incident = _normalize_recovery_incident_payload(recovery.get("incident"))
+    retry = _normalize_recovery_retry_payload(recovery.get("retry"))
+    legacy_owner = str(recovery.get("owner") or "")
+    legacy_reason = str(recovery.get("reason") or "")
+    legacy_resume_role = str(recovery.get("resume_role") or "")
+    legacy_resume_task_id = str(recovery.get("resume_task_id") or "")
+    legacy_resume_attempt = _normalize_int(recovery.get("resume_attempt"))
+    legacy_commit = str(recovery.get("commit") or "")
+    legacy_details = recovery.get("details")
+    normalized_details = deepcopy(legacy_details) if isinstance(legacy_details, dict) else {}
+    legacy_retry_count = recovery.get("count")
+    if legacy_retry_count in (None, ""):
+        legacy_retry_count = recovery.get("retry_count")
+    if legacy_retry_count in (None, ""):
+        legacy_retry_count = recovery.get("attempts")
+    legacy_retry_count_normalized = _normalize_int(legacy_retry_count)
+
+    if legacy_owner == "runtime":
+        if not retry["count"] and legacy_retry_count_normalized:
+            retry["count"] = legacy_retry_count_normalized
+        if not retry["reason"] and legacy_reason:
+            retry["reason"] = legacy_reason
+        if not retry["resume_role"] and legacy_resume_role:
+            retry["resume_role"] = legacy_resume_role
+        if not retry["resume_task_id"] and legacy_resume_task_id:
+            retry["resume_task_id"] = legacy_resume_task_id
+        if not retry["resume_attempt"] and legacy_resume_attempt:
+            retry["resume_attempt"] = legacy_resume_attempt
+    else:
+        if not incident["owner"] and legacy_owner:
+            incident["owner"] = legacy_owner
+        if not incident["reason"] and legacy_reason:
+            incident["reason"] = legacy_reason
+        if not incident["resume_role"] and legacy_resume_role:
+            incident["resume_role"] = legacy_resume_role
+        if not incident["resume_task_id"] and legacy_resume_task_id:
+            incident["resume_task_id"] = legacy_resume_task_id
+        if not incident["resume_attempt"] and legacy_resume_attempt:
+            incident["resume_attempt"] = legacy_resume_attempt
+        if not incident["commit"] and legacy_commit:
+            incident["commit"] = legacy_commit
+        if not incident["details"] and normalized_details:
+            incident["details"] = normalized_details
+
+    normalized["incident"] = incident
+    normalized["retry"] = retry
+    if _recovery_incident_has_data(incident):
+        normalized["owner"] = incident["owner"]
+        normalized["reason"] = incident["reason"]
+        normalized["resume_role"] = incident["resume_role"]
+        normalized["resume_task_id"] = incident["resume_task_id"]
+        normalized["resume_attempt"] = incident["resume_attempt"]
+    elif _recovery_retry_has_data(retry):
+        normalized["owner"] = "runtime"
+        normalized["reason"] = retry["reason"]
+        normalized["resume_role"] = retry["resume_role"]
+        normalized["resume_task_id"] = retry["resume_task_id"]
+        normalized["resume_attempt"] = retry["resume_attempt"]
     if normalized["status"] not in RECOVERY_STATUS_CHOICES:
         normalized["status"] = "clear"
     return normalized
@@ -294,12 +427,13 @@ def normalize_runtime_payload(runtime_payload: dict[str, Any]) -> dict[str, Any]
     payload["last_task_id"] = str(payload.get("last_task_id") or "")
     payload["recovery"] = normalize_recovery_payload(payload.get("recovery"))
     if payload["status"] == "recovery" and payload["recovery"]["status"] == "clear":
-        payload["recovery"] = default_recovery_payload()
-        payload["recovery"].update(
+        reason = str(payload.get("terminal_reason") or payload.get("last_reason") or "")
+        payload["recovery"] = normalize_recovery_payload(
             {
                 "status": "pending",
-                "owner": "runtime",
-                "reason": str(payload.get("terminal_reason") or payload.get("last_reason") or ""),
+                "retry": {
+                    "reason": reason,
+                },
             }
         )
     return payload
