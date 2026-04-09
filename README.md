@@ -29,7 +29,7 @@ The planner will interactively define the goal, scope, and task DAG with you. On
 $harness run
 ```
 
-The runtime launches in the background and works through the tasks autonomously.
+The runtime launches in the background and keeps scheduling implementers, verifiers, and planner follow-ups until the DAG is exhausted or an unrecoverable runtime fault pauses the run.
 
 ## Modes
 
@@ -54,6 +54,8 @@ flowchart TD
     H --> C
     G -->|revert| I[Reset task worktree]
     I --> D
+    G -->|recovery signal or conflict| K[Record recovery context]
+    K --> B
     C -->|empty| J[Done]
 ```
 
@@ -65,18 +67,18 @@ Each role runs as a separate Codex turn with an isolated context window and retu
 | **Implementer** | Works one task, makes code changes, creates a trial commit | Cannot edit `tasks.json` |
 | **Verifier** | Evaluates the trial commit against acceptance criteria | Cannot modify code; returns `accept` or `revert`, and may request recovery when verification is ambiguous |
 
-The runtime itself is not an LLM — it's a Python script that reads reports, applies verdicts, and decides which role runs next. If multiple independent tasks are ready, implementers run in parallel in isolated Git worktrees. Accepted task commits are cherry-picked back onto the main branch so the final history stays linear. If a task is rejected, the task worktree is reset for retry and main stays untouched.
+The runtime itself is not an LLM — it's a Python script that reads reports, applies verdicts, and decides which role runs next. If multiple independent tasks are ready, implementers run in parallel in isolated Git worktrees. Accepted task commits are cherry-picked back onto the main branch so the final history stays linear, then the runtime refreshes readiness and keeps going until the DAG is exhausted. If a task is rejected, the task worktree is reset for retry and main stays untouched.
 
 ## Recovery Mode
 
-When the harness cannot continue its normal loop, it records recovery context instead of treating the run as a normal terminal outcome. Typical recovery cases today are:
+Recovery is liveness-first. When verification or integration hits a planner-fixable problem, the runtime records recovery context, hands control back to the planner, and continues the same background run. Typical planner-owned recovery cases today are:
 
 - acceptance criteria are ambiguous or under-specified
 - the environment blocks a verification command
 - an accepted task commit cannot be integrated cleanly onto main
-- the repo is in an inconsistent state the runtime should not repair automatically
+- the repo is in an inconsistent state the planner should repair by adding clarification or repair tasks
 
-In those cases `harness-runtime.json` and `harness-state.json` record recovery ownership, reason, and resume hints so the next run can continue from an explicit recovery point.
+Only launch/runtime faults the harness cannot repair safely leave `harness-runtime.json` in `recovery` for a later resume. `needs_human` is kept only as a legacy compatibility input; new runs record structured recovery ownership, reason, and resume hints in `harness-runtime.json` and `harness-state.json`.
 
 ## What It Writes
 

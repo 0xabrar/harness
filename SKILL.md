@@ -99,8 +99,8 @@ The background runtime loops autonomously:
 2. Builds the role prompt.
 3. Sends a turn to Codex via the app-server JSON-RPC protocol.
 4. Receives the structured report via `outputSchema`.
-5. Applies supervisor transitions (accept/cherry-pick, retry/reset, replan, dispatch next role).
-6. Repeats until all tasks are done or it enters recovery.
+5. Applies supervisor transitions (accept/cherry-pick, continue-after-accept, retry/reset, planner recovery handoff, dispatch next role).
+6. Repeats until all tasks are done or an unrecoverable runtime fault leaves the run in recovery.
 
 If `tasks.json` already has `ready` tasks, the runtime skips the initial planner turn and goes directly to the implementer.
 
@@ -139,7 +139,7 @@ Confirm to the user that the runtime was halted and note the terminal reason if 
 - `planner`: user-facing before launch; owns `plan.md` and `tasks.json`; may add, split, reprioritize, and close tasks.
 - `implementer`: writes product code for one ready task in its task worktree and creates a trial commit.
 - `verifier`: evaluates the exact trial commit and returns `accept` or `revert`.
-- `runtime`: not an LLM role; communicates with Codex via the app-server JSON-RPC protocol, applies verifier verdicts, updates artifacts, and manages resume/status/stop. When the planner produces multiple independent tasks, the runtime runs implementers in parallel in isolated task worktrees and cherry-picks accepted commits back onto the main branch.
+- `runtime`: not an LLM role; communicates with Codex via the app-server JSON-RPC protocol, applies verifier verdicts, updates artifacts, and manages resume/status/stop. When the planner produces multiple independent tasks, the runtime runs implementers in parallel in isolated task worktrees, cherry-picks accepted commits back onto the main branch, and keeps scheduling until the DAG is exhausted.
 
 ## When Activated
 
@@ -155,9 +155,9 @@ Confirm to the user that the runtime was halted and note the terminal reason if 
 
 1. User defines the plan interactively via `$harness <goal>` (plan mode).
 2. User launches with `$harness run` (run mode).
-3. Background runtime: implementer works a ready task → verifier evaluates → runtime applies verdict → repeat.
-4. Runtime re-invokes the planner when: tasks need replanning, proposals are pending, or no ready tasks remain.
-5. Loop ends when all tasks are done or the runtime enters recovery.
+3. Background runtime: implementer works a ready task → verifier evaluates → runtime integrates, retries, or records recovery context → repeat.
+4. Runtime re-invokes the planner when: tasks need replanning, recovery metadata points to planner follow-up, proposals are pending, or no ready tasks remain.
+5. Loop ends when all tasks are done or an unrecoverable launch/runtime issue leaves the run paused in recovery.
 
 ## Hard Rules
 
@@ -167,7 +167,7 @@ Confirm to the user that the runtime was halted and note the terminal reason if 
 4. The verifier returns only `accept` or `revert`, and ambiguous verification should be surfaced as recovery rather than normal progress.
 5. The runtime may update execution-state fields for the current task (`in_progress`, `in_review`, `done`, `ready`, `blocked`) when applying verifier verdicts, but it does not invent product work or change DAG topology.
 6. All role-to-role communication happens through artifacts in the target repo.
-7. Recovery is a safety valve, not a normal step in the loop.
+7. Planner-owned recovery is a continuation path, not a terminal outcome; only unrecoverable runtime/launch faults should leave the run paused in recovery.
 8. Use helper scripts for state/event/lessons updates whenever possible.
 9. The background runtime executes as fresh role turns via the app-server protocol. Foreground/manual same-session runs are unsupported.
 

@@ -78,7 +78,7 @@ class HarnessFlowTests(unittest.TestCase):
             events = (repo / "harness-events.tsv").read_text(encoding="utf-8")
             self.assertIn("initialize", events)
 
-    def test_supervisor_accept_flow(self) -> None:
+    def test_supervisor_accept_flow_completes_single_task_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = setup_repo(Path(tmp))
             initialize_run(
@@ -479,7 +479,7 @@ class HarnessFlowTests(unittest.TestCase):
             self.assertEqual(main_head_before, git(repo, "rev-parse", "HEAD"))
             self.assertIn(str(worktree), git(repo, "worktree", "list"))
 
-    def test_report_alias_fields_are_accepted(self) -> None:
+    def test_report_alias_fields_are_accepted_for_single_task_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = setup_repo(Path(tmp))
             initialize_run(
@@ -543,6 +543,7 @@ class HarnessFlowTests(unittest.TestCase):
             )
             outcome = evaluate_supervisor_status(repo=repo)
             self.assertEqual(outcome["decision"], "stop")
+            self.assertEqual(outcome["reason"], "all_tasks_done")
 
 
 if __name__ == "__main__":

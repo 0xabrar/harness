@@ -15,7 +15,7 @@ from harness_artifacts import default_paths  # noqa: E402
 
 
 class RoleFlowTests(unittest.TestCase):
-    def test_planner_to_implementer_to_verifier_accept_path(self) -> None:
+    def test_final_task_accept_marks_run_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             initialize_run(
                 repo=tmp,
@@ -94,6 +94,7 @@ class RoleFlowTests(unittest.TestCase):
             )
             verifier_decision = evaluate_supervisor_status(repo=tmp)
             self.assertEqual(verifier_decision["decision"], "stop")
+            self.assertEqual(verifier_decision["reason"], "all_tasks_done")
             state = read_json(paths.state)
             self.assertTrue(state["state"]["completed"])
             self.assertEqual(state["state"]["active_tasks"], {})

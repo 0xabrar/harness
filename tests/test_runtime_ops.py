@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from harness_app_server import AppServerError
 from harness_artifacts import HarnessError, build_launch_manifest, default_paths, write_json_atomic, write_tasks
 from harness_init_run import initialize_run
+from harness_launch_gate import evaluate_launch_context
 from harness_runtime_ops import run_role_turn, run_runtime, sandbox_for_role, start_runtime
 from harness_task_worktree import IntegrationResult
 
@@ -482,7 +483,7 @@ class TestThreadResume(unittest.TestCase):
 
 
 class TestRunRuntimeScheduling(unittest.TestCase):
-    def test_run_runtime_bootstraps_missing_state_and_events_before_dispatch(self) -> None:
+    def test_run_runtime_bootstraps_resumable_launch_recovery_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             paths = default_paths(repo)
@@ -526,6 +527,10 @@ class TestRunRuntimeScheduling(unittest.TestCase):
                 },
             )
             paths.plan.write_text("# Plan\n", encoding="utf-8")
+
+            gate = evaluate_launch_context(repo=repo)
+            self.assertEqual(gate["decision"], "resumable")
+            self.assertEqual(gate["reason"], "bootstrap_missing_run_local_artifacts")
 
             dispatch_checks: list[tuple[str, str]] = []
 
@@ -1127,7 +1132,7 @@ class TestRunRuntimeScheduling(unittest.TestCase):
             self.assertEqual(runtime_payload["status"], "terminal")
             self.assertEqual(runtime_payload["terminal_reason"], "all_tasks_done")
 
-    def test_planner_owned_recovery_dispatches_planner_follow_up_and_reaches_terminal(self) -> None:
+    def test_verifier_recovery_dispatches_planner_follow_up_and_reaches_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             paths = default_paths(repo)

@@ -58,7 +58,7 @@ def seed_task(repo: Path, task_id: str = "1", title: str = "Test task") -> None:
 
 
 class TestFullAcceptCycle(unittest.TestCase):
-    """Planner -> implementer -> verifier (accept) -> stop, using report_override."""
+    """Planner -> implementer -> verifier (accept) -> completion when the single task exhausts the DAG."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
@@ -80,7 +80,7 @@ class TestFullAcceptCycle(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_full_planner_implementer_verifier_accept_cycle(self) -> None:
+    def test_full_planner_implementer_verifier_accept_cycle_completes_final_task(self) -> None:
         # Seed a task into tasks.json (simulating what the planner would do)
         seed_task(self.repo, task_id="1", title="Implement feature")
 
@@ -127,7 +127,7 @@ class TestFullAcceptCycle(unittest.TestCase):
         self.assertEqual(state["state"]["active_tasks"]["1"]["role"], "verifier")
         self.assertEqual(state["state"]["active_tasks"]["1"]["trial_commit"], commit)
 
-        # --- Step 3: Verifier accepts ---
+        # --- Step 3: Verifier accepts the final task, so the exhausted DAG completes ---
         verifier_report = {
             "role": "verifier",
             "task_id": "1",

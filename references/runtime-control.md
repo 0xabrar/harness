@@ -25,9 +25,11 @@ The runtime:
 6. Sends a `turn/start` request to the app-server for that role (with the appropriate sandbox mode and `outputSchema`).
 7. Applies verifier verdicts (`accept` or `revert`), including cherry-picking accepted task commits onto main and resetting rejected task worktrees for retry.
 8. Updates `harness-runtime.json`, `harness-state.json`, `harness-events.tsv`, and `harness-lessons.md`.
-9. Transitions into recovery if progress is unsafe or inconsistent.
+9. Records recovery metadata and either re-runs planner (planner-owned recovery) or pauses in runtime recovery if progress is unsafe or inconsistent.
 
-Typical recovery cases are ambiguous acceptance criteria, environment blockers during verification, and integration failures while applying accepted task-local commits onto main.
+Typical planner-owned recovery cases are ambiguous acceptance criteria, environment blockers during verification, exhausted runtime retries that need planner intervention, and integration failures while applying accepted task-local commits onto main.
+
+This is a liveness-first model. A supervisor `recovery` decision is not automatically terminal: the runtime should continue the same background run whenever the planner can clarify, repair, or sequence the next work safely. Only runtime-owned/bootstrap faults that the loop cannot repair should leave the runtime paused in `recovery`.
 
 ## Non-Responsibilities
 
@@ -59,7 +61,7 @@ The detached runtime should:
 1. Run with `stdin=DEVNULL`.
 2. Append stdout/stderr to `harness-runtime.log`.
 3. Persist pid/pgid and terminal reason in `harness-runtime.json`.
-4. Send role turns via the app-server JSON-RPC protocol until a terminal state is reached.
+4. Send role turns via the app-server JSON-RPC protocol until all tasks are done or an unrecoverable runtime recovery is reached.
 
 ## Canonical Decisions
 
@@ -73,6 +75,8 @@ The runtime may emit only these high-level control decisions:
 - `stop`
 - `recovery`
 
+`recovery` is reserved for cases where the control plane cannot safely continue without preserving explicit recovery metadata. Planner-owned recovery incidents may still resolve inside the same run after a planner follow-up.
+
 ## Planner Interaction
 
 The planner is the human-facing role before launch and the canonical owner of the task DAG throughout the run.
@@ -81,6 +85,9 @@ The runtime may schedule planner again when:
 
 - the run has no plan yet,
 - task proposals are pending,
+- verifier recovery signals require clarification or repair work,
+- accepted work surfaced an integration-conflict repair task,
+- runtime retries exhausted and the planner must unblock the DAG,
 - repeated verifier failures require replanning,
 - no ready tasks remain,
 - the planner explicitly requested another revision.
