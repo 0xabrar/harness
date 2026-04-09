@@ -32,10 +32,15 @@ class TestLoadSchema(unittest.TestCase):
         self.assertIn("role", schema["properties"])
         self.assertEqual(schema["properties"]["role"]["const"], "verifier")
         self.assertIn("verdict", schema["required"])
+        self.assertIn("recovery_signal", schema["required"])
         self.assertIn("criteria_results", schema["required"])
         self.assertEqual(
             schema["properties"]["verdict"]["enum"],
-            ["accept", "revert", "needs_human"],
+            ["accept", "revert"],
+        )
+        self.assertEqual(
+            schema["properties"]["recovery_signal"]["enum"],
+            ["none", "environment_blocked", "ambiguous_acceptance_criteria"],
         )
 
 
@@ -59,6 +64,7 @@ class TestValidateReport(unittest.TestCase):
             "attempt": 1,
             "commit": "abc1234",
             "verdict": "accept",
+            "recovery_signal": "none",
             "summary": "All criteria met.",
             "findings": [],
             "criteria_results": [{"criterion": "tests pass", "result": "pass", "evidence": "exit 0"}],
@@ -73,6 +79,22 @@ class TestValidateReport(unittest.TestCase):
             "attempt": 1,
             "commit": "abc1234",
             "verdict": "maybe",
+            "recovery_signal": "none",
+            "summary": "Uncertain.",
+            "findings": [],
+            "criteria_results": [],
+            "proposed_tasks": [],
+        }
+        self.assertFalse(validate_report(report, "verifier"))
+
+    def test_validate_invalid_recovery_signal_rejected(self) -> None:
+        report = {
+            "role": "verifier",
+            "task_id": "T-001",
+            "attempt": 1,
+            "commit": "abc1234",
+            "verdict": "revert",
+            "recovery_signal": "manual_decision_required",
             "summary": "Uncertain.",
             "findings": [],
             "criteria_results": [],

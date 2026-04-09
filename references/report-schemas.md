@@ -50,6 +50,7 @@ Compatibility note:
   "attempt": 1,
   "commit": "abc1234",
   "verdict": "accept",
+  "recovery_signal": "none",
   "summary": "Acceptance criteria passed; regression checks are green.",
   "findings": [],
   "criteria_results": [
@@ -65,6 +66,7 @@ Compatibility note:
 
 Compatibility note:
 - the runtime also accepts `evaluated_commit` as an alias for `commit`
+- `recovery_signal` is required; use `none` for ordinary verification, `environment_blocked` when the environment prevents deterministic checks, and `ambiguous_acceptance_criteria` when the planner must clarify the task before retrying
 
 ## Proposal Convention
 

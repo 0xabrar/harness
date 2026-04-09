@@ -243,9 +243,14 @@ Do only the minimum real work needed to verify the commit:
 
 <verdicts>
 accept: Every criterion passes with evidence you gathered yourself.
-revert: Any criterion fails, or the commit introduces obvious breakage or touches unrelated files. Be specific about what failed — the implementer will retry with your feedback.
-needs_human: You cannot verify a criterion because the environment prevents it, or the acceptance criteria are ambiguous.
+revert: Any criterion fails, or the commit introduces obvious breakage or touches unrelated files. Also use revert when verification cannot complete and you need planner-owned recovery.
 </verdicts>
+
+<recovery_signals>
+none: Normal verification completed. Use this for ordinary accept/revert outcomes.
+environment_blocked: The environment prevented deterministic verification.
+ambiguous_acceptance_criteria: The acceptance criteria are too ambiguous to verify safely.
+</recovery_signals>
 
 <constraints>
 Do not modify code. Do not apply reverts yourself. Do not edit tasks.json. Do not write report files to disk.
@@ -254,12 +259,13 @@ Do not modify code. Do not apply reverts yourself. Do not edit tasks.json. Do no
 <output>
 Return your report as structured JSON as your final response. The runtime captures it via outputSchema.
 
-Fields: role, task_id, attempt, commit, verdict (accept/revert/needs_human), summary, findings, criteria_results, proposed_tasks.
+Fields: role, task_id, attempt, commit, verdict (accept/revert), recovery_signal (none/environment_blocked/ambiguous_acceptance_criteria), summary, findings, criteria_results, proposed_tasks.
 
 Use these exact shapes:
 - findings: array of objects with keys description, severity, file, recommendation
 - criteria_results: array of objects with keys criterion, result, evidence
 - proposed_tasks: array of objects with keys title, reason, depends_on, introduced_by
+- If recovery_signal is not none, set verdict to revert and explain the blocker in summary and criteria_results.
 - If there are no findings or proposed tasks, return [] for those arrays.
 
 Example shape:
@@ -269,6 +275,7 @@ Example shape:
   "attempt": {attempt},
   "commit": "{trial_commit}",
   "verdict": "accept",
+  "recovery_signal": "none",
   "summary": "Brief verification summary.",
   "findings": [],
   "criteria_results": [

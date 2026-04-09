@@ -27,6 +27,12 @@ from harness_artifacts import (
 from harness_lessons import append_lesson
 from harness_task_worktree import git_head, integrate_commit, remove_task_worktree, reset_task_worktree
 
+VERIFIER_RECOVERY_SIGNALS = {
+    "none",
+    "environment_blocked",
+    "ambiguous_acceptance_criteria",
+}
+
 
 def _active_tasks(state_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return normalize_state_payload(state_payload)["state"]["active_tasks"]
@@ -297,8 +303,15 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
         raise HarnessError(f"Verifier report for {task_id} must identify the evaluated commit.")
 
     verdict = str(report.get("verdict") or "")
-    if verdict not in {"accept", "revert", "needs_human"}:
-        raise HarnessError("Verifier verdict must be accept, revert, or needs_human.")
+    if verdict not in {"accept", "revert"}:
+        raise HarnessError("Verifier verdict must be accept or revert.")
+    recovery_signal = str(report.get("recovery_signal") or "none")
+    if recovery_signal not in VERIFIER_RECOVERY_SIGNALS:
+        raise HarnessError(
+            "Verifier recovery_signal must be none, environment_blocked, or ambiguous_acceptance_criteria."
+        )
+    if recovery_signal != "none" and verdict != "revert":
+        raise HarnessError("Verifier recovery_signal requires verdict=revert.")
 
     verdict_path = report_path_for_role(paths, "verifier", task_id=task_id, attempt=attempt)
     write_json_atomic(verdict_path, report)
@@ -312,6 +325,25 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
 
     state_payload["state"]["verifier_runs"] += 1
     state_payload["state"]["last_verdict"] = verdict
+
+    if recovery_signal != "none":
+        state_payload["state"]["last_status"] = "recovery"
+        task["status"] = "blocked"
+        task["blocked_reason"] = summary
+        task["last_verdict"] = "revert"
+        state_payload["state"]["recovery_requests"] += 1
+        state_payload["state"]["blocked"] += 1
+        active.pop(task_id, None)
+        _set_recovery(
+            state_payload,
+            owner="planner",
+            reason=recovery_signal,
+            resume_role="planner",
+            resume_task_id=task_id,
+            resume_attempt=attempt,
+            commit=commit,
+        )
+        return {"decision": "recovery", "reason": recovery_signal, "report": report, "tasks": tasks_payload}
 
     if verdict == "accept":
         integrated_commit = commit
@@ -390,23 +422,6 @@ def verifier_report_state(paths, state_payload: dict[str, Any], tasks_payload: d
                 "tasks": tasks_payload,
             }
         return {"decision": "relaunch", "reason": "continue_after_accept", "report": report, "tasks": tasks_payload}
-
-    if verdict == "needs_human":
-        state_payload["state"]["last_status"] = "recovery"
-        task["status"] = "blocked"
-        task["blocked_reason"] = summary
-        state_payload["state"]["recovery_requests"] += 1
-        state_payload["state"]["blocked"] += 1
-        active.pop(task_id, None)
-        _set_recovery(
-            state_payload,
-            owner="planner",
-            reason=summary,
-            resume_role="planner",
-            resume_task_id=task_id,
-            resume_attempt=attempt,
-        )
-        return {"decision": "recovery", "reason": "verifier_escalated", "report": report, "tasks": tasks_payload}
 
     _clear_recovery(state_payload)
     state_payload["state"]["last_status"] = "revert"

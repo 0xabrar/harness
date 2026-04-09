@@ -273,18 +273,23 @@ class HarnessFlowTests(unittest.TestCase):
                     "task_id": "T-001",
                     "attempt": 1,
                     "evaluated_commit": trial_commit,
-                    "verdict": "needs_human",
+                    "verdict": "revert",
+                    "recovery_signal": "environment_blocked",
                     "summary": "Manual decision required.",
+                    "findings": [],
                     "criteria_results": [],
                     "proposed_tasks": [],
                 },
             )
             outcome = evaluate_supervisor_status(repo=repo)
             self.assertEqual(outcome["decision"], "recovery")
+            self.assertEqual("environment_blocked", outcome["reason"])
             state = read_json(repo / "harness-state.json")
             self.assertEqual(1, state["state"]["recovery_requests"])
+            self.assertEqual("recovery", state["state"]["last_status"])
             self.assertEqual("pending", state["state"]["recovery"]["status"])
             self.assertEqual("planner", state["state"]["recovery"]["owner"])
+            self.assertEqual("environment_blocked", state["state"]["recovery"]["reason"])
             self.assertEqual("T-001", state["state"]["recovery"]["resume_task_id"])
             self.assertEqual({}, state["state"]["active_tasks"])
             tasks = read_json(repo / "tasks.json")
@@ -352,7 +357,8 @@ class HarnessFlowTests(unittest.TestCase):
                     "task_id": "T-001",
                     "attempt": 1,
                     "commit": trial_commit,
-                    "verdict": "needs_human",
+                    "verdict": "revert",
+                    "recovery_signal": "ambiguous_acceptance_criteria",
                     "summary": "Acceptance criteria are ambiguous.",
                     "findings": [],
                     "criteria_results": [],
@@ -361,11 +367,14 @@ class HarnessFlowTests(unittest.TestCase):
             )
             outcome = evaluate_supervisor_status(repo=repo)
             self.assertEqual(outcome["decision"], "recovery")
+            self.assertEqual("ambiguous_acceptance_criteria", outcome["reason"])
 
             state = read_json(repo / "harness-state.json")
             self.assertEqual(1, state["state"]["recovery_requests"])
+            self.assertEqual("recovery", state["state"]["last_status"])
             self.assertEqual("pending", state["state"]["recovery"]["status"])
             self.assertEqual("planner", state["state"]["recovery"]["owner"])
+            self.assertEqual("ambiguous_acceptance_criteria", state["state"]["recovery"]["reason"])
             self.assertEqual("T-001", state["state"]["recovery"]["resume_task_id"])
             self.assertEqual({}, state["state"]["active_tasks"])
             tasks = read_json(repo / "tasks.json")

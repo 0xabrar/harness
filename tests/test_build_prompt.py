@@ -157,7 +157,9 @@ class TestVerifierPrompt(unittest.TestCase):
         prompt = build_verifier_prompt(FAKE_PATHS)
         self.assertIn("role", prompt)
         self.assertIn("verdict", prompt)
+        self.assertIn("recovery_signal", prompt)
         self.assertIn("criteria_results", prompt)
+        self.assertNotIn("needs_human", prompt)
 
 
 if __name__ == "__main__":
